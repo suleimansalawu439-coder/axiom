@@ -20,6 +20,13 @@ public final class BenchReceipt {
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     /**
+     * A task's outcome. {@link Status#UNATTEMPTED} marks tasks the harness
+     * deliberately did not run (e.g. a GAIA question whose attachment file
+     * could not be fetched) — they are never counted as failures.
+     */
+    public enum Status { PASSED, FAILED, UNATTEMPTED }
+
+    /**
      * One task's measured outcome, with the full detail needed to audit it:
      * the prompt, what was expected, the step-by-step trace, the SWE test
      * output (when applicable), and the complete error (when the harness
@@ -30,11 +37,24 @@ public final class BenchReceipt {
                              long latencyMs, String detail,
                              String prompt, String expected,
                              List<Map<String, Object>> trace,
-                             String testOutput, String error) {
+                             String testOutput, String error, Status status) {
         public long totalTokens() { return promptTokens + completionTokens; }
+
+        /** Backward-compatible constructor: status derives from {@code passed}. */
+        public TaskResult(String taskId, String kind, boolean passed, String output,
+                          long promptTokens, long completionTokens, double costUsd,
+                          long latencyMs, String detail,
+                          String prompt, String expected,
+                          List<Map<String, Object>> trace,
+                          String testOutput, String error) {
+            this(taskId, kind, passed, output, promptTokens, completionTokens, costUsd,
+                latencyMs, detail, prompt, expected, trace, testOutput, error,
+                passed ? Status.PASSED : Status.FAILED);
+        }
 
         public TaskResult {
             trace = trace == null ? List.of() : List.copyOf(trace);
+            status = status == null ? (passed ? Status.PASSED : Status.FAILED) : status;
         }
     }
 
@@ -90,10 +110,17 @@ public final class BenchReceipt {
     /** Task parallelism used (1 = sequential). */
     public int parallelism() { return parallelism; }
 
-    public int passed() { return (int) results.stream().filter(TaskResult::passed).count(); }
-    public int failed() { return results.size() - passed(); }
+    public int passed() { return (int) results.stream()
+        .filter(r -> r.status() == Status.PASSED).count(); }
+    public int failed() { return (int) results.stream()
+        .filter(r -> r.status() == Status.FAILED).count(); }
+    /** Tasks the harness deliberately did not run — never counted as failures. */
+    public int unattempted() { return (int) results.stream()
+        .filter(r -> r.status() == Status.UNATTEMPTED).count(); }
+    /** Tasks actually run (passed + failed). */
+    public int attempted() { return passed() + failed(); }
     public double passRate() {
-        return results.isEmpty() ? 0.0 : (double) passed() / results.size();
+        return attempted() == 0 ? 0.0 : (double) passed() / attempted();
     }
     public double totalCostUsd() {
         return results.stream().mapToDouble(TaskResult::costUsd).sum();
@@ -131,6 +158,7 @@ public final class BenchReceipt {
             Map<String, Object> rm = new LinkedHashMap<>();
             rm.put("taskId", r.taskId());
             rm.put("kind", r.kind());
+            rm.put("status", r.status().name());
             rm.put("passed", r.passed());
             rm.put("output", r.output());
             rm.put("promptTokens", r.promptTokens());
@@ -149,8 +177,10 @@ public final class BenchReceipt {
         m.put("results", rs);
         Map<String, Object> totals = new LinkedHashMap<>();
         totals.put("tasks", results.size());
+        totals.put("attempted", attempted());
         totals.put("passed", passed());
         totals.put("failed", failed());
+        totals.put("unattempted", unattempted());
         totals.put("passRate", passRate());
         totals.put("totalTokens", totalTokens());
         totals.put("totalCostUsd", totalCostUsd());
@@ -166,13 +196,22 @@ public final class BenchReceipt {
         sb.append("Benchmark receipt: %s %s | model=%s mode=%s%n"
             .formatted(framework, frameworkVersion, model, mode));
         for (TaskResult r : results) {
+            String mark = switch (r.status()) {
+                case PASSED -> "PASS";
+                case FAILED -> "FAIL";
+                case UNATTEMPTED -> "SKIP";
+            };
             sb.append("  [%s] %-20s %s (%d tokens, $%.4f, %dms)%n".formatted(
-                r.passed() ? "PASS" : "FAIL", r.taskId(), r.kind(),
+                mark, r.taskId(), r.kind(),
                 r.totalTokens(), r.costUsd(), r.latencyMs()));
         }
-        sb.append("Totals: %d/%d passed (%.0f%%), %d tokens, $%.4f, %dms wall clock (%dms task time summed, parallelism=%d)".formatted(
-            passed(), results.size(), passRate() * 100, totalTokens(), totalCostUsd(),
-            wallClockMs, totalLatencyMs(), parallelism));
+        sb.append("Totals: %d/%d attempted passed (%.0f%% of attempted), "
+            .formatted(passed(), attempted(), passRate() * 100));
+        sb.append("%d failed, %d unattempted, %d tokens, $%.4f, %dms wall clock "
+            .formatted(failed(), unattempted(), totalTokens(), totalCostUsd(),
+                wallClockMs));
+        sb.append("(%dms task time summed, parallelism=%d)".formatted(
+            totalLatencyMs(), parallelism));
         if (!notes.isBlank()) sb.append("%nNotes: %s".formatted(notes));
         return sb.toString();
     }

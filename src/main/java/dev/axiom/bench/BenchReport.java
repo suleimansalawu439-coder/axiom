@@ -26,8 +26,9 @@ public final class BenchReport {
         row(sb, "Mode", receipt.mode());
         row(sb, "Timestamp", receipt.timestamp().toString());
         row(sb, "Result",
-            "%d/%d passed (%.0f%%)".formatted(
-                receipt.passed(), receipt.results().size(), receipt.passRate() * 100));
+            "%d/%d attempted passed (%.0f%% of attempted); %d failed, %d unattempted".formatted(
+                receipt.passed(), receipt.attempted(), receipt.passRate() * 100,
+                receipt.failed(), receipt.unattempted()));
         row(sb, "Total tokens", String.valueOf(receipt.totalTokens()));
         row(sb, "Total cost", "$%.4f".formatted(receipt.totalCostUsd()));
         row(sb, "Total latency", "%dms".formatted(receipt.totalLatencyMs()));
@@ -43,8 +44,12 @@ public final class BenchReport {
     }
 
     private static void taskSection(StringBuilder sb, TaskResult r) {
-        sb.append("### [%s] %s (%s)\n\n".formatted(
-            r.passed() ? "PASS" : "FAIL", r.taskId(), r.kind()));
+        String mark = switch (r.status()) {
+            case PASSED -> "PASS";
+            case FAILED -> "FAIL";
+            case UNATTEMPTED -> "UNATTEMPTED";
+        };
+        sb.append("### [%s] %s (%s)\n\n".formatted(mark, r.taskId(), r.kind()));
         sb.append("- **Prompt:** ").append(inline(r.prompt())).append("\n");
         if (r.expected() != null) {
             sb.append("- **Expected:** ").append(inline(r.expected())).append("\n");

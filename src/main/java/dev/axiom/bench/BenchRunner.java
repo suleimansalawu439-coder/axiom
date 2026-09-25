@@ -28,6 +28,21 @@ public final class BenchRunner {
     private BenchRunner() {}
 
     /**
+     * Decides whether an agent's output passes against the expected answer.
+     * The default is substring containment; suites with stricter rules
+     * (e.g. GAIA's normalized exact match) supply their own.
+     */
+    @FunctionalInterface
+    public interface OutputScorer {
+        boolean score(String output, String expected);
+    }
+
+    /** Default scorer: the output contains the expected text. */
+    public static final OutputScorer CONTAINS_SCORER =
+        (output, expected) -> output != null && expected != null
+            && output.contains(expected);
+
+    /**
      * @param tasks        the tasks to run, in order
      * @param agentFactory builds the agent for each task; receives the task
      *                     and its scratch workdir (temp copy of
@@ -72,10 +87,23 @@ public final class BenchRunner {
                                    BiFunction<BenchTask, Path, BenchAgent> agentFactory,
                                    ModelPrices prices, String model, String mode,
                                    long pacingMs, String notes, BenchRunConfig config) {
+        return run(tasks, agentFactory, prices, model, mode, pacingMs, notes,
+            config, CONTAINS_SCORER);
+    }
+
+    /**
+     * Full run with a custom output scorer (e.g. GAIA's normalized exact
+     * match). Everything else behaves exactly like the standard full run.
+     */
+    public static BenchReceipt run(List<BenchTask> tasks,
+                                   BiFunction<BenchTask, Path, BenchAgent> agentFactory,
+                                   ModelPrices prices, String model, String mode,
+                                   long pacingMs, String notes, BenchRunConfig config,
+                                   OutputScorer scorer) {
         long wallStart = System.currentTimeMillis();
         List<TaskResult> results = config.parallelism() <= 1
-            ? runSequential(tasks, agentFactory, prices, model, pacingMs, config)
-            : runParallel(tasks, agentFactory, prices, model, config);
+            ? runSequential(tasks, agentFactory, prices, model, pacingMs, config, scorer)
+            : runParallel(tasks, agentFactory, prices, model, config, scorer);
         long wallClockMs = System.currentTimeMillis() - wallStart;
         return new BenchReceipt("axiom", Version.CURRENT, model, mode,
             Instant.now(), results, notes == null ? "" : notes,
@@ -86,7 +114,8 @@ public final class BenchRunner {
     private static List<TaskResult> runSequential(List<BenchTask> tasks,
                                                   BiFunction<BenchTask, Path, BenchAgent> agentFactory,
                                                   ModelPrices prices, String model,
-                                                  long pacingMs, BenchRunConfig config) {
+                                                  long pacingMs, BenchRunConfig config,
+                                                  OutputScorer scorer) {
         List<TaskResult> results = new ArrayList<>();
         boolean first = true;
         for (int i = 0; i < tasks.size(); i++) {
@@ -101,7 +130,7 @@ public final class BenchRunner {
             }
             first = false;
             try {
-                results.add(runOne(task, agentFactory, prices, model));
+                results.add(runOne(task, agentFactory, prices, model, scorer));
             } catch (QuotaExhaustedException qe) {
                 if (!config.failFastOnQuota()) throw qe;
                 results.add(quotaResult(task, qe));
@@ -123,12 +152,12 @@ public final class BenchRunner {
     private static List<TaskResult> runParallel(List<BenchTask> tasks,
                                                 BiFunction<BenchTask, Path, BenchAgent> agentFactory,
                                                 ModelPrices prices, String model,
-                                                BenchRunConfig config) {
+                                                BenchRunConfig config, OutputScorer scorer) {
         ExecutorService pool = Executors.newFixedThreadPool(config.parallelism());
         try {
             List<Future<TaskResult>> futures = new ArrayList<>();
             for (BenchTask task : tasks) {
-                futures.add(pool.submit(() -> runOne(task, agentFactory, prices, model)));
+                futures.add(pool.submit(() -> runOne(task, agentFactory, prices, model, scorer)));
             }
             List<TaskResult> results = new ArrayList<>();
             for (int i = 0; i < futures.size(); i++) {
@@ -184,7 +213,8 @@ public final class BenchRunner {
 
     private static TaskResult runOne(BenchTask task,
                                      BiFunction<BenchTask, Path, BenchAgent> agentFactory,
-                                     ModelPrices prices, String model) {
+                                     ModelPrices prices, String model,
+                                     OutputScorer scorer) {
         Path workdir = null;
         long start = System.currentTimeMillis();
         try {
@@ -206,10 +236,9 @@ public final class BenchRunner {
                 passed = outcome.exitCode() == 0;
                 detail = "testCommand <%s> exited %d".formatted(task.testCommand(), outcome.exitCode());
             } else {
-                passed = result.output() != null
-                    && result.output().contains(task.expectedOutputContains());
-                detail = passed ? "output contained expected text"
-                    : "output did not contain <" + task.expectedOutputContains() + ">";
+                passed = scorer.score(result.output(), task.expectedOutputContains());
+                detail = passed ? "output matched expected answer"
+                    : "output did not match <" + task.expectedOutputContains() + ">";
             }
             long latencyMs = System.currentTimeMillis() - start;
             double cost = prices.costUsd(model, result.tokenUsage().promptTokens(),

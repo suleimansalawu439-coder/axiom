@@ -2,6 +2,8 @@ package dev.axiom.durable;
 
 import dev.axiom.agent.AgentEvent;
 import dev.axiom.llm.ToolCallRequest;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.BufferedWriter;
 import java.io.FileOutputStream;
@@ -102,6 +104,7 @@ public final class RunJournal implements AutoCloseable {
     private final FileOutputStream fos;
     private final BufferedWriter writer;
     private long seq;
+    private static final Logger log = LoggerFactory.getLogger(RunJournal.class);
 
     private RunJournal(Path dir, String runId, boolean create) {
         try {
@@ -244,7 +247,21 @@ public final class RunJournal implements AutoCloseable {
         return runId;
     }
 
-    /** Read and parse every record in order. */
+    /**
+     * Read and parse every record in order.
+     *
+     * <p>Two corruption policies, matching write-ahead-log practice:
+     * <ul>
+     *   <li><b>Torn tail:</b> when the <em>last</em> line fails to parse, the
+     *       process died mid-write — that record was never acknowledged, so
+     *       it is dropped (a warning is logged) and the run resumes as if
+     *       the write never happened. Previously a torn tail poisoned the
+     *       entire journal and made resume impossible.</li>
+     *   <li><b>Corrupt middle:</b> any other unparseable line aborts loudly
+     *       with the line number — the journal is never silently resumed
+     *       from a corrupted state.</li>
+     * </ul>
+     */
     public List<Record> readAll() {
         List<Record> out = new ArrayList<>();
         List<String> lines;
@@ -256,9 +273,24 @@ public final class RunJournal implements AutoCloseable {
         } catch (Exception e) {
             throw new DurableException("Failed to read journal " + runId, e);
         }
-        for (String line : lines) {
+        int last = lines.size() - 1;
+        while (last >= 0 && lines.get(last).isBlank()) last--;
+        for (int i = 0; i <= last; i++) {
+            String line = lines.get(i);
             if (line.isBlank()) continue;
-            Map<String, Object> m = JournalCodec.decodeLine(line);
+            Map<String, Object> m;
+            try {
+                m = JournalCodec.decodeLine(line);
+            } catch (DurableException e) {
+                if (i == last) {
+                    log.warn("Journal {}: dropping torn final line {} (process died mid-write): {}",
+                        runId, i + 1, e.getMessage());
+                    continue;
+                }
+                throw new DurableException(
+                    "Corrupt journal '" + runId + "' at line " + (i + 1)
+                        + " of " + (last + 1) + ": " + e.getMessage(), e);
+            }
             String kind = String.valueOf(m.get("kind"));
             Instant ts = parseInstant(m.get("timestamp"));
             switch (kind) {

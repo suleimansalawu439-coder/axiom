@@ -137,6 +137,10 @@ try {
 
 Every LLM call is charged; breaching a limit throws `BudgetExceededException` (carrying the full snapshot). `BudgetUpdated` events fire after every call — even the breaching one — so UIs can render live cost meters. Budgets are thread-safe and shareable across a supervisor team.
 
+## v0.6.0 — what's new
+
+Chaos suite: adversarial battle-testing, all fixture-driven and CI-safe (no network, no keys). New `dev.axiom.chaos` tests: `ConcurrencyHammerTest` (24 parallel agents, journal ledger coherence under contention), `KillResumeChaosTest` (real `destroyForcibly()` kills mid-tool-call and mid-LLM-call in a separate OS process, then resume), `JournalCorruptionTest` (byte-flips and truncations at every offset), `AdversarialToolTest` (throwing/hanging/huge-payload tools), plus `HostileProviderTest` (truncated SSE, garbage chunks, absurd Retry-After) and `RetryHintCapTest`. Three genuine robustness bugs found and fixed by the suite: (1) `RetryingLlmClient` honored a provider's `Retry-After` hint uncapped — a hostile hint could park the retry loop effectively forever (now capped at 10 minutes); (2) a torn final journal line (crash mid-write) poisoned the entire journal and made resume impossible — the torn tail is now dropped with a warning and the run resumes as if the write never happened; (3) corrupted journal payloads surfaced as bare `ClassCastException`s (or, worse, an unknown event type silently resumed as a blank run) — corruption now aborts with a `DurableException` naming the journal, line number, and field.
+
 ## v0.5.5 — what's new
 
 Benchmark speed: parallel task execution, a real rate limiter, and fail-fast on dead quotas. Tasks now run concurrently (configurable via `AXIOM_BENCH_PARALLEL`, `--sequential` to opt out) sharing one token-bucket limiter (`AXIOM_BENCH_RPM`, per-preset defaults) that paces *every LLM call* — across turns and tasks — instead of the old fixed sleep between tasks. Daily/plan quota exhaustion (HTTP 429 with "check your plan and billing") now aborts the run in seconds: no more minutes burned retrying a quota that refills in hours; remaining tasks are recorded as aborted, honestly. Receipts carry `wallClockMs` and `parallelism` so run duration is auditable. On a free tier the floor is the provider's requests/minute; with request headroom (paid key, local model) the 4-task run completes in roughly the slowest task's time.
@@ -365,12 +369,12 @@ GAIA-style and SWE-bench-style runners that record machine-readable receipts —
 
 ```bash
 # Offline / deterministic (default): scripted model fixtures, REAL tool execution
-java -cp "target/axiom-0.5.5.jar:lib/*" dev.axiom.bench.BenchMain
+java -cp "target/axiom-0.6.0.jar:lib/*" dev.axiom.bench.BenchMain
 # -> benchmarks/receipts/receipt-fixture-<timestamp>.json
 
 # Live: against a real model, free or paid
 AXIOM_BENCH_PROVIDER=gemini GEMINI_API_KEY=... \
-  java -cp "target/axiom-0.5.5.jar:lib/*" dev.axiom.bench.BenchMain --live
+  java -cp "target/axiom-0.6.0.jar:lib/*" dev.axiom.bench.BenchMain --live
 # -> benchmarks/receipts/receipt-live-gemini-<timestamp>.json
 ```
 
@@ -421,7 +425,7 @@ If `webSearch`'s signature and its schema ever disagree, the build fails. That's
 No Maven required (a `pom.xml` is included for standard environments):
 
 ```bash
-./build.sh   # compiles, runs all tests, packages target/axiom-0.5.5.jar
+./build.sh   # compiles, runs all tests, packages target/axiom-0.6.0.jar
 ```
 
 Requirements: JDK 21 (auto-detected at `~/workspace/tools/jdk-21`).
@@ -430,7 +434,7 @@ Requirements: JDK 21 (auto-detected at `~/workspace/tools/jdk-21`).
 
 ```bash
 export OPENAI_API_KEY=sk-...
-java -cp "target/axiom-0.5.5.jar:lib/*" dev.axiom.demo.DemoAgent "What is 17*23, and save the answer as a note?"
+java -cp "target/axiom-0.6.0.jar:lib/*" dev.axiom.demo.DemoAgent "What is 17*23, and save the answer as a note?"
 ```
 
 ## Roadmap

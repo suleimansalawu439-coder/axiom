@@ -95,25 +95,29 @@ final class JournalCodec {
             case "RunStarted" -> new AgentEvent.RunStarted(timestamp, str(m.get("task")));
             case "LlmRequest" -> new AgentEvent.LlmRequest(timestamp, num(m.get("iteration")));
             case "LlmResponse" -> new AgentEvent.LlmResponse(timestamp, num(m.get("iteration")),
-                responseFromMap((Map<String, Object>) m.get("response")));
+                responseFromMap(reqMap(m.get("response"), "LlmResponse.response")));
             case "ToolCallStarted" -> new AgentEvent.ToolCallStarted(timestamp,
-                callFromMap((Map<String, Object>) m.get("call")));
+                callFromMap(reqMap(m.get("call"), "ToolCallStarted.call")));
             case "ToolCallFinished" -> {
-                var call = callFromMap((Map<String, Object>) m.get("call"));
+                var call = callFromMap(reqMap(m.get("call"), "ToolCallFinished.call"));
                 Object d = m.get("durationMs");
                 yield new AgentEvent.ToolCallFinished(timestamp, call, str(m.get("result")),
                     d instanceof Number n ? n.longValue() : 0L);
             }
             case "ApprovalRequested" -> new AgentEvent.ApprovalRequested(timestamp,
-                str(m.get("toolName")), (Map<String, Object>) m.getOrDefault("arguments", Map.of()));
+                str(m.get("toolName")), optMapOrEmpty(m.get("arguments"), "ApprovalRequested.arguments"));
             case "BudgetUpdated" -> new AgentEvent.BudgetUpdated(timestamp,
-                usageFromMap((Map<String, Object>) m.get("charged")),
-                snapshotFromMap((Map<String, Object>) m.get("snapshot")));
+                usageFromMap(optMap(m.get("charged"), "BudgetUpdated.charged")),
+                snapshotFromMap(reqMap(m.get("snapshot"), "BudgetUpdated.snapshot")));
             case "RunFinished" -> new AgentEvent.RunFinished(timestamp,
-                resultFromMap((Map<String, Object>) m.get("result")));
+                resultFromMap(reqMap(m.get("result"), "RunFinished.result")));
             case "GuardrailBlocked" -> new AgentEvent.GuardrailBlocked(timestamp,
                 str(m.get("guardrailName")), str(m.get("side")), str(m.get("reason")));
-            default -> new AgentEvent.RunStarted(timestamp, "");
+            // No lenient fallback: an unknown event type means the journal is
+            // corrupt (or from an incompatible version) — resuming it as a
+            // blank RunStarted would silently poison the transcript.
+            default -> throw new DurableException(
+                "Corrupt journal record: unknown event type '" + type + "'");
         };
     }
 
@@ -133,11 +137,16 @@ final class JournalCodec {
     static ChatResponse responseFromMap(Map<String, Object> m) {
         List<ToolCallRequest> calls = new ArrayList<>();
         Object raw = m.get("toolCalls");
-        if (raw instanceof List<?> list) {
-            for (Object o : list) calls.add(callFromMap((Map<String, Object>) o));
+        if (raw != null) {
+            if (!(raw instanceof List<?> list)) {
+                throw new DurableException(
+                    "Corrupt journal record: expected a list for 'LlmResponse.toolCalls' but found "
+                        + describe(raw));
+            }
+            for (Object o : list) calls.add(callFromMap(reqMap(o, "LlmResponse.toolCalls[]")));
         }
         return new ChatResponse(strOrNull(m.get("content")), calls,
-            usageFromMap((Map<String, Object>) m.get("usage")));
+            usageFromMap(optMap(m.get("usage"), "LlmResponse.usage")));
     }
 
     static Map<String, Object> callToMap(ToolCallRequest c) {
@@ -199,8 +208,40 @@ final class JournalCodec {
     static AgentResult resultFromMap(Map<String, Object> m) {
         return new AgentResult(strOrNull(m.get("output")), num(m.get("iterations")),
             num(m.get("toolCallsMade")),
-            usageFromMap((Map<String, Object>) m.get("usage")),
+            usageFromMap(optMap(m.get("usage"), "RunFinished.result.usage")),
             Boolean.TRUE.equals(m.get("completed")));
+    }
+
+    /**
+     * Require an object-typed value from a decoded journal record. A missing
+     * or wrong-typed value means the journal is corrupt — fail with a
+     * diagnostic naming the field instead of a bare
+     * {@link ClassCastException} or {@link NullPointerException}.
+     */
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> reqMap(Object o, String field) {
+        if (o instanceof Map<?, ?> m) return (Map<String, Object>) m;
+        throw new DurableException("Corrupt journal record: expected an object for '" + field
+            + "' but found " + describe(o));
+    }
+
+    /** Like {@link #reqMap} but tolerates a missing value (still rejects a wrong-typed one). */
+    private static Map<String, Object> optMap(Object o, String field) {
+        if (o == null) return null;
+        return reqMap(o, field);
+    }
+
+    /** Like {@link #optMap} but yields an empty map instead of null when missing. */
+    private static Map<String, Object> optMapOrEmpty(Object o, String field) {
+        Map<String, Object> m = optMap(o, field);
+        return m == null ? Map.of() : m;
+    }
+
+    private static String describe(Object o) {
+        if (o == null) return "nothing";
+        String s = String.valueOf(o);
+        if (s.length() > 60) s = s.substring(0, 60) + "…";
+        return o.getClass().getSimpleName() + "(" + s + ")";
     }
 
     private static String str(Object o) {

@@ -41,6 +41,15 @@ public final class RetryingLlmClient implements StreamingLlmClient {
     private final RetryPolicy policy;
     private final Sleeper sleeper;
 
+    /**
+     * Upper bound for a provider-hinted retry delay: ten minutes. The
+     * {@code Retry-After} hint is advisory, not a command — a hostile or
+     * buggy provider (or a custom {@link LlmClient} that mis-reports
+     * {@code retryAfterSeconds}) must not be able to park the retry loop
+     * effectively forever.
+     */
+    private static final long MAX_HINTED_WAIT_SECONDS = 600;
+
     /** Swappable sleep for tests. */
     @FunctionalInterface
     public interface Sleeper {
@@ -123,7 +132,10 @@ public final class RetryingLlmClient implements StreamingLlmClient {
     private void sleepBeforeRetry(Exception failure, int attempt) {
         Duration wait = policy.backoffForAttempt(attempt + 1);
         if (failure instanceof LlmException le && le.retryAfterSeconds() >= 0) {
-            Duration hinted = Duration.ofSeconds(le.retryAfterSeconds());
+            // Cap the provider's hint: without this, a single absurd
+            // Retry-After (hours, years) would wedge the run in sleep.
+            long hintedSecs = Math.min(le.retryAfterSeconds(), MAX_HINTED_WAIT_SECONDS);
+            Duration hinted = Duration.ofSeconds(hintedSecs);
             if (hinted.compareTo(wait) > 0) {
                 wait = hinted;
             }

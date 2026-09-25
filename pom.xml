@@ -6,7 +6,7 @@
 
     <groupId>dev.axiom</groupId>
     <artifactId>axiom</artifactId>
-    <version>0.1.0</version>
+    <version>0.2.0</version>
     <packaging>jar</packaging>
     <name>Axiom — Type-Safe AI Agent Framework for the JVM</name>
 

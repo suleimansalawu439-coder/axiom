@@ -2,6 +2,7 @@
 # Axiom build script (no Maven required).
 # Uses the JDK at ~/workspace/tools/jdk-21 and jars in ./lib.
 set -e
+set -o pipefail
 cd "$(dirname "$0")"
 
 JAVA_HOME="$HOME/workspace/tools/jdk-21"
@@ -25,16 +26,24 @@ if [ ! -f lib/jackson-databind-2.17.2.jar ] || [ ! -f lib/junit-platform-console
 fi
 
 CP_MAIN="lib/jackson-databind-2.17.2.jar:lib/jackson-core-2.17.2.jar:lib/jackson-annotations-2.17.2.jar:lib/slf4j-api-2.0.13.jar:lib/slf4j-simple-2.0.13.jar"
-CP_TEST="target/classes:$CP_MAIN:lib/junit-platform-console-standalone-1.10.3.jar"
+CP_TEST="target/test-classes:target/classes:$CP_MAIN:lib/junit-platform-console-standalone-1.10.3.jar"
 
 rm -rf target/classes target/test-classes
 mkdir -p target/classes target/test-classes
 
-echo "==> Compiling main sources (Axiom ToolProcessor active)..."
+echo "==> Compiling main sources..."
 javac -parameters -d target/classes -cp "$CP_MAIN" $(find src/main/java -name "*.java")
 cp -r src/main/resources/* target/classes/
 
-echo "==> Compiling tests..."
+echo "==> Validating @Tool schemas with the Axiom ToolProcessor..."
+# The processor is compiled as part of main sources, so it cannot validate
+# them in the same javac run (chicken-and-egg). This -proc:only pass applies
+# it to main sources explicitly: any @Tool violation fails the build here,
+# and the JSON schema docs are generated into META-INF/axiom/tools/.
+javac -parameters -proc:only -processorpath target/classes -cp "$CP_MAIN" \
+  -d target/classes $(find src/main/java -name "*.java")
+
+echo "==> Compiling tests (ToolProcessor active)..."
 javac -parameters -d target/test-classes -cp "$CP_TEST" -processorpath target/classes \
   $(find src/test/java -name "*.java")
 
@@ -42,9 +51,15 @@ echo "==> Running tests..."
 java -jar lib/junit-platform-console-standalone-1.10.3.jar execute \
   --class-path "$CP_TEST" \
   --select-class dev.axiom.tools.ToolRegistryTest \
+  --select-class dev.axiom.tools.SubprocessToolTest \
   --select-class dev.axiom.agent.ReActAgentTest \
-  --select-class dev.axiom.llm.OpenAiCompatibleClientTest 2>&1 | tail -8
+  --select-class dev.axiom.llm.OpenAiCompatibleClientTest \
+  --select-class dev.axiom.mcp.McpClientTest \
+  --select-class dev.axiom.teams.SupervisorTeamTest \
+  --select-class dev.axiom.memory.VectorMemoryTest \
+  --select-class dev.axiom.memory.OpenAiEmbeddingsTest \
+  --select-class dev.axiom.budget.BudgetTest 2>&1 | tail -12
 
-echo "==> Packaging axiom-0.1.0.jar..."
-jar --create --file target/axiom-0.1.0.jar -C target/classes .
-echo "Done: target/axiom-0.1.0.jar"
+echo "==> Packaging axiom-0.2.0.jar..."
+jar --create --file target/axiom-0.2.0.jar -C target/classes .
+echo "Done: target/axiom-0.2.0.jar"

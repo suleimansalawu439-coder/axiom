@@ -11,6 +11,10 @@ import java.util.*;
  * {@link ToolDefinition}s. Argument JSON from the LLM is coerced to Java
  * types via Jackson — a coercion failure raises a descriptive error that is
  * fed back to the LLM so it can self-correct, instead of crashing the run.
+ *
+ * <p>Synthetic tools (MCP server tools, supervisor delegate tools) can be
+ * added directly via {@link #register(ToolDefinition)}; they share the same
+ * invocation, timeout, and approval machinery as annotated tools.
  */
 public final class ToolRegistry {
     private final Map<String, ToolDefinition> tools = new LinkedHashMap<>();
@@ -22,14 +26,20 @@ public final class ToolRegistry {
             Tool ann = method.getAnnotation(Tool.class);
             if (ann == null) continue;
             String name = ann.name().isBlank() ? method.getName() : ann.name();
-            if (tools.containsKey(name)) {
-                throw new IllegalStateException("Duplicate tool name: " + name);
-            }
-            tools.put(name, new ToolDefinition(
+            register(ToolDefinition.forMethod(
                 name, ann.description(), buildSchema(method),
                 ann.requiresApproval(), ann.timeoutSeconds(),
-                toolHolder, method));
+                reflectiveInvoker(toolHolder, method, name), method));
         }
+        return this;
+    }
+
+    /** Register a synthetic tool definition (MCP, supervisor delegates, …). */
+    public ToolRegistry register(ToolDefinition definition) {
+        if (tools.containsKey(definition.name())) {
+            throw new IllegalStateException("Duplicate tool name: " + definition.name());
+        }
+        tools.put(definition.name(), definition);
         return this;
     }
 
@@ -48,7 +58,21 @@ public final class ToolRegistry {
             throw new ToolInvocationException("Unknown tool: '" + name + "'. Available: " + tools.keySet());
         }
         try {
-            Method method = def.method();
+            return def.invoker().invoke(arguments);
+        } catch (ToolInvocationException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new ToolInvocationException(
+                "Tool '%s' failed: %s".formatted(name, rootCause(e).getMessage()), e);
+        }
+    }
+
+    /**
+     * Build the reflective invoker for an annotated method: coerces each JSON
+     * argument to the declared Java parameter type.
+     */
+    private ToolInvoker reflectiveInvoker(Object toolHolder, Method method, String toolName) {
+        return arguments -> {
             Parameter[] params = method.getParameters();
             Object[] args = new Object[params.length];
             for (int i = 0; i < params.length; i++) {
@@ -57,19 +81,19 @@ public final class ToolRegistry {
                 Object raw = arguments.get(paramName);
                 if (raw == null && tp != null && tp.required()) {
                     throw new ToolInvocationException(
-                        "Missing required argument '%s' for tool '%s'".formatted(paramName, name));
+                        "Missing required argument '%s' for tool '%s'".formatted(paramName, toolName));
                 }
                 args[i] = raw == null ? null : mapper.convertValue(raw, params[i].getType());
             }
             // Note: requires -parameters at compile time for real param names;
             // the annotation processor enforces this (see ToolProcessor).
-            return method.invoke(def.target(), args);
-        } catch (ToolInvocationException e) {
-            throw e;
-        } catch (Exception e) {
-            throw new ToolInvocationException(
-                "Tool '%s' failed: %s".formatted(name, rootCause(e).getMessage()), e);
-        }
+            try {
+                return method.invoke(toolHolder, args);
+            } catch (Exception e) {
+                throw new ToolInvocationException(
+                    "Tool '%s' failed: %s".formatted(toolName, rootCause(e).getMessage()), e);
+            }
+        };
     }
 
     private static Throwable rootCause(Throwable t) {

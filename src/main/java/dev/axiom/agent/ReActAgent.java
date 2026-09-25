@@ -1,6 +1,8 @@
 package dev.axiom.agent;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import dev.axiom.budget.Budget;
+import dev.axiom.budget.BudgetExceededException;
 import dev.axiom.llm.*;
 import dev.axiom.output.OutputSchema;
 import dev.axiom.output.StructuredOutputException;
@@ -61,6 +63,7 @@ public final class ReActAgent {
             new LlmClient.LlmOptions(config.temperature(), 4096).withJsonSchema(schema);
         config.emit(new AgentEvent.LlmRequest(Instant.now(), run.result().iterations() + 1));
         ChatResponse formatted = config.client().chat(messages, List.of(), options);
+        chargeBudget(formatted.usage());
 
         String json = formatted.content() == null ? "" : formatted.content().trim();
         // Tolerate markdown fences some providers add despite instructions.
@@ -101,6 +104,7 @@ public final class ReActAgent {
             config.emit(new AgentEvent.LlmRequest(Instant.now(), iteration));
             ChatResponse response = config.client().chat(messages, toolDefs, options);
             totalUsage = totalUsage.add(response.usage());
+            chargeBudget(response.usage());
             config.emit(new AgentEvent.LlmResponse(Instant.now(), iteration, response));
 
             if (!response.hasToolCalls()) {
@@ -125,6 +129,7 @@ public final class ReActAgent {
         ChatResponse closing = config.client().chat(
             withClosingInstruction(messages), List.of(), options);
         totalUsage = totalUsage.add(closing.usage());
+        chargeBudget(closing.usage());
         AgentResult result = new AgentResult(
             closing.content(), config.maxIterations(), toolCallsMade, totalUsage, false);
         config.emit(new AgentEvent.RunFinished(Instant.now(), result));
@@ -136,6 +141,22 @@ public final class ReActAgent {
     private void persistMemory(List<ChatMessage> messages) {
         if (config.memory() != null) {
             config.memory().store(messages);
+        }
+    }
+
+    /**
+     * Charge one LLM call against the run's budget (if configured) and emit
+     * {@link AgentEvent.BudgetUpdated}. The event fires even when the charge
+     * breaches the budget — the {@link BudgetExceededException} then aborts
+     * the run with the snapshot attached.
+     */
+    private void chargeBudget(ChatResponse.TokenUsage usage) {
+        Budget budget = config.budget();
+        if (budget == null) return;
+        try {
+            budget.charge(config.client().model(), usage);
+        } finally {
+            config.emit(new AgentEvent.BudgetUpdated(Instant.now(), usage, budget.snapshot()));
         }
     }
 

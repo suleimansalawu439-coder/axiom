@@ -1,7 +1,9 @@
 package dev.axiom.agent;
 
+import dev.axiom.budget.Budget;
 import dev.axiom.llm.LlmClient;
 import dev.axiom.memory.Memory;
+import dev.axiom.tools.ToolDefinition;
 import dev.axiom.tools.ToolRegistry;
 
 import java.util.ArrayList;
@@ -17,6 +19,7 @@ public final class AgentConfig {
     private final double temperature;
     private final ApprovalHandler approvalHandler;
     private final Memory memory;
+    private final Budget budget;
     private final List<Consumer<AgentEvent>> eventListeners;
 
     private AgentConfig(Builder b) {
@@ -27,6 +30,7 @@ public final class AgentConfig {
         this.temperature = b.temperature;
         this.approvalHandler = b.approvalHandler;
         this.memory = b.memory;
+        this.budget = b.budget;
         this.eventListeners = List.copyOf(b.eventListeners);
     }
 
@@ -37,6 +41,8 @@ public final class AgentConfig {
     public double temperature() { return temperature; }
     public ApprovalHandler approvalHandler() { return approvalHandler; }
     public Memory memory() { return memory; }
+    /** The run's token/cost budget, or null if none is configured. */
+    public Budget budget() { return budget; }
     public List<Consumer<AgentEvent>> eventListeners() { return eventListeners; }
 
     void emit(AgentEvent event) {
@@ -62,6 +68,7 @@ public final class AgentConfig {
         private double temperature = 0.7;
         private ApprovalHandler approvalHandler = ApprovalHandler.allowAll();
         private Memory memory;
+        private Budget budget;
         private final List<Consumer<AgentEvent>> eventListeners = new ArrayList<>();
 
         public Builder withClient(LlmClient client) { this.client = client; return this; }
@@ -73,11 +80,23 @@ public final class AgentConfig {
             for (Object h : toolHolders) tools.register(h);
             return this;
         }
+        /** Register prebuilt tool definitions (MCP tools, supervisor delegate tools, …). */
+        public Builder withToolDefinitions(ToolDefinition... definitions) {
+            for (ToolDefinition d : definitions) tools.register(d);
+            return this;
+        }
         public Builder withSystemPrompt(String prompt) { this.systemPrompt = prompt; return this; }
         public Builder withMaxIterations(int n) { this.maxIterations = n; return this; }
         public Builder withTemperature(double t) { this.temperature = t; return this; }
         public Builder withApprovalHandler(ApprovalHandler h) { this.approvalHandler = h; return this; }
         public Builder withMemory(Memory memory) { this.memory = memory; return this; }
+        /**
+         * Cap the run's token usage and/or USD cost. The agent charges every
+         * LLM call against the budget and aborts with
+         * {@link dev.axiom.budget.BudgetExceededException} when a limit is
+         * breached; spend is visible via {@link AgentEvent.BudgetUpdated}.
+         */
+        public Builder withBudget(Budget budget) { this.budget = budget; return this; }
         public Builder onEvent(Consumer<AgentEvent> listener) {
             this.eventListeners.add(listener);
             return this;

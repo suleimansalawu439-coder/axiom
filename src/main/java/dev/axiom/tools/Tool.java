@@ -23,4 +23,14 @@ public @interface Tool {
 
     /** Execution timeout in seconds. */
     long timeoutSeconds() default 60;
+
+    /**
+     * Declare the tool idempotent: re-executing it with identical arguments
+     * is side-effect safe (pure reads, upserts keyed by a stable id, …).
+     * Durable resume re-executes a tool call that started but never completed
+     * (crash window) <em>only</em> when this is true; otherwise resume aborts
+     * loudly instead of risking a double side effect. Default {@code false} —
+     * never inferred, always declared by the tool author.
+     */
+    boolean idempotent() default false;
 }

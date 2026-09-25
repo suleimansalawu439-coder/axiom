@@ -61,7 +61,7 @@ class DurableRunTest {
     static class CalcTools {
         int invocations = 0;
 
-        @Tool(description = "Multiply two numbers")
+        @Tool(name = "du_multiply", description = "Multiply two numbers")
         public int multiply(@ToolParam(description = "x") int x,
                             @ToolParam(description = "y") int y) {
             invocations++;
@@ -100,7 +100,7 @@ class DurableRunTest {
     void crashBetweenToolCallAndNextTurnResumesWithoutReexecutingTool(@TempDir Path root) {
         var tools = new CalcTools();
         var crashing = new FakeLlm()
-            .enqueue(toolCall("c1", "multiply", Map.of("x", 6, "y", 7)))
+            .enqueue(toolCall("c1", "du_multiply", Map.of("x", 6, "y", 7)))
             // crash on the 2nd LLM call: the tool already ran and was journaled
             .crashOnCall(2, new RuntimeException("simulated crash"));
 
@@ -216,7 +216,7 @@ class DurableRunTest {
     void journalRoundTripsAllEventTypes(@TempDir Path root) {
         var tools = new CalcTools();
         var llm = new FakeLlm()
-            .enqueue(toolCall("c1", "multiply", Map.of("x", 2, "y", 3)))
+            .enqueue(toolCall("c1", "du_multiply", Map.of("x", 2, "y", 3)))
             .enqueue(finalAnswer("6"));
         var config = AgentConfig.builder()
             .withClient(llm)

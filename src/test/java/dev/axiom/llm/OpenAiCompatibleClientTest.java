@@ -17,7 +17,7 @@ import static org.junit.jupiter.api.Assertions.*;
 class OpenAiCompatibleClientTest {
 
     static class MathTools {
-        @Tool(description = "Multiply")
+        @Tool(name = "oc_multiply", description = "Multiply")
         public int multiply(@ToolParam(description = "x") int x,
                             @ToolParam(description = "y") int y) {
             return x * y;
@@ -40,7 +40,7 @@ class OpenAiCompatibleClientTest {
         var wireTools = (List<Map<String, Object>>) body.get("tools");
         assertEquals(1, wireTools.size());
         var fn = (Map<String, Object>) wireTools.get(0).get("function");
-        assertEquals("multiply", fn.get("name"));
+        assertEquals("oc_multiply", fn.get("name"));
         var params = (Map<String, Object>) fn.get("parameters");
         var props = (Map<String, Object>) params.get("properties");
         assertEquals("integer", ((Map<String, Object>) props.get("x")).get("type"));
@@ -67,7 +67,7 @@ class OpenAiCompatibleClientTest {
              "choices":[{"index":0,"message":{
                 "role":"assistant","content":null,
                 "tool_calls":[{"id":"call_1","type":"function",
-                  "function":{"name":"multiply","arguments":"{\\"x\\":6,\\"y\\":7}"}}]},
+                  "function":{"name":"oc_multiply","arguments":"{\\"x\\":6,\\"y\\":7}"}}]},
                "finish_reason":"tool_calls"}],
              "usage":{"prompt_tokens":50,"completion_tokens":10,"total_tokens":60}}
             """;
@@ -75,7 +75,7 @@ class OpenAiCompatibleClientTest {
         assertTrue(resp.hasToolCalls());
         assertEquals(1, resp.toolCalls().size());
         assertEquals("call_1", resp.toolCalls().get(0).id());
-        assertEquals("multiply", resp.toolCalls().get(0).name());
+        assertEquals("oc_multiply", resp.toolCalls().get(0).name());
         assertEquals(6, resp.toolCalls().get(0).arguments().get("x"));
         assertEquals(60, resp.usage().totalTokens());
     }
@@ -96,7 +96,7 @@ class OpenAiCompatibleClientTest {
     @Test
     @SuppressWarnings("unchecked")
     void assistantToolCallsEchoedOnWire() {
-        var tc = new ToolCallRequest("call_9", "multiply", Map.of("x", 2, "y", 3));
+        var tc = new ToolCallRequest("call_9", "oc_multiply", Map.of("x", 2, "y", 3));
         Map<String, Object> body = client().buildRequestBody(
             List.of(ChatMessage.assistantWithToolCalls(null, List.of(tc))),
             List.of(), LlmClient.LlmOptions.defaults());

@@ -1,6 +1,7 @@
 package dev.axiom.durable;
 
 import dev.axiom.agent.AgentEvent;
+import dev.axiom.llm.ToolCallRequest;
 
 import java.io.BufferedWriter;
 import java.io.FileOutputStream;
@@ -29,13 +30,43 @@ import java.util.UUID;
  *       the original config.</li>
  *   <li>{@code event} — every {@link AgentEvent} except the ephemeral
  *       {@code StreamToken}.</li>
+ *   <li>{@code tool_call_started} — written <b>before</b> a tool body
+ *       executes, carrying the call's idempotency key.</li>
+ *   <li>{@code tool_call_completed} — written <b>after</b> a tool body
+ *       returns, carrying the idempotency key and the serialized result.</li>
  *   <li>{@code checkpoint} — explicit checkpoint marker.</li>
  * </ul>
+ *
+ * <h2>Exactly-once guarantee</h2>
+ * <p>Every tool call gets a stable idempotency key
+ * ({@code runId + "#" + toolCallId}; see
+ * {@link dev.axiom.agent.ReActAgent} for why the key is derived from the
+ * call id rather than the arguments). The two {@code tool_call_*} records
+ * form a side-effect ledger around the tool body:
+ * <ul>
+ *   <li><b>Exactly-once:</b> a call whose {@code tool_call_completed}
+ *       record exists is replayed from the recorded result on resume — the
+ *       tool body is never re-executed.</li>
+ *   <li><b>Crash window (started, never completed):</b> the tool may or may
+ *       not have executed. Resume re-executes the call <em>only</em> when the
+ *       tool is declared {@code idempotent=true} on its
+ *       {@link dev.axiom.tools.ToolDefinition} (default {@code false}, never
+ *       inferred). Otherwise resume aborts with {@link DurableException}
+ *       naming the ambiguous call — a double side effect is never applied
+ *       silently.</li>
+ *   <li><b>At-least-once:</b> a call with no {@code tool_call_started}
+ *       record (the crash happened before the ledger entry, or the journal
+ *       predates this ledger) is re-executed on resume, as before.</li>
+ * </ul>
+ * <p>Journals written before the {@code tool_call_*} records existed resume
+ * exactly as they used to: {@code ToolCallFinished} events are treated as
+ * completions, and calls without them are re-executed at-least-once.
  */
 public final class RunJournal implements AutoCloseable {
 
     /** A parsed journal record. */
-    public sealed interface Record permits RunStarted, Event, Checkpoint {}
+    public sealed interface Record permits RunStarted, Event, Checkpoint,
+        ToolCallStarted, ToolCallCompleted {}
 
     /** The run's task and the config snapshot needed to rebuild it. */
     public record RunStarted(Instant timestamp, String task,
@@ -46,6 +77,24 @@ public final class RunJournal implements AutoCloseable {
 
     /** An explicit checkpoint marker. */
     public record Checkpoint(Instant timestamp, long entries) implements Record {}
+
+    /**
+     * A tool call's idempotency key was registered <b>before</b> the tool
+     * body executed. On resume, a started key with no matching
+     * {@link ToolCallCompleted} is the crash window: the tool may or may not
+     * have run.
+     */
+    public record ToolCallStarted(Instant timestamp, String idempotencyKey,
+                                  String callId, String toolName,
+                                  Map<String, Object> arguments) implements Record {}
+
+    /**
+     * A tool call finished and its serialized result was recorded under its
+     * idempotency key. On resume this result is replayed — the tool body is
+     * never re-executed.
+     */
+    public record ToolCallCompleted(Instant timestamp, String idempotencyKey,
+                                    String result) implements Record {}
 
     private final Path dir;
     private final Path logFile;
@@ -136,6 +185,36 @@ public final class RunJournal implements AutoCloseable {
     }
 
     /**
+     * Register a tool call's idempotency key <b>before</b> the tool body
+     * executes. Must be called before any side effect happens; on resume, a
+     * started key without a matching completion marks the crash window.
+     */
+    public synchronized void appendToolCallStarted(String idempotencyKey, ToolCallRequest call) {
+        Map<String, Object> r = new LinkedHashMap<>();
+        r.put("kind", "tool_call_started");
+        r.put("timestamp", Instant.now().toString());
+        r.put("idempotencyKey", idempotencyKey);
+        r.put("callId", call.id());
+        r.put("toolName", call.name());
+        r.put("arguments", call.arguments() == null ? Map.of() : call.arguments());
+        writeLine(r);
+    }
+
+    /**
+     * Record a tool call's serialized result under its idempotency key,
+     * <b>after</b> the tool body returned. On resume this result is replayed
+     * instead of re-executing the tool.
+     */
+    public synchronized void appendToolCallCompleted(String idempotencyKey, String result) {
+        Map<String, Object> r = new LinkedHashMap<>();
+        r.put("kind", "tool_call_completed");
+        r.put("timestamp", Instant.now().toString());
+        r.put("idempotencyKey", idempotencyKey);
+        r.put("result", result);
+        writeLine(r);
+    }
+
+    /**
      * Flush, fsync, and record a checkpoint marker. Returns the checkpoint
      * id — stable for the run, so it doubles as the resume handle.
      */
@@ -197,6 +276,11 @@ public final class RunJournal implements AutoCloseable {
                     Object n = m.get("entries");
                     out.add(new Checkpoint(ts, n instanceof Number num ? num.longValue() : 0L));
                 }
+                case "tool_call_started" -> out.add(new ToolCallStarted(ts,
+                    str(m.get("idempotencyKey")), str(m.get("callId")),
+                    str(m.get("toolName")), argsMap(m.get("arguments"))));
+                case "tool_call_completed" -> out.add(new ToolCallCompleted(ts,
+                    str(m.get("idempotencyKey")), strOrNull(m.get("result"))));
                 default -> { /* ignore unknown record kinds */ }
             }
         }
@@ -252,6 +336,19 @@ public final class RunJournal implements AutoCloseable {
         } catch (Exception e) {
             return Instant.now();
         }
+    }
+
+    private static String str(Object o) {
+        return o == null ? "" : String.valueOf(o);
+    }
+
+    private static String strOrNull(Object o) {
+        return o == null ? null : String.valueOf(o);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> argsMap(Object o) {
+        return o instanceof Map<?, ?> m ? (Map<String, Object>) m : Map.of();
     }
 
     @SuppressWarnings("unchecked")

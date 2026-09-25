@@ -6,15 +6,15 @@ Every mainstream agent framework defines tools as runtime dictionaries: misspell
 
 ## Features
 
-- **Compile-time tool schemas** — annotate a method with `@Tool`; the annotation processor validates it during compilation (public method, documented `@ToolParam` on every parameter, mappable types, real parameter names via `-parameters`). Violations are build errors, and a JSON schema document is generated to `META-INF/axiom/tools/`.
+- **Compile-time tool schemas** — annotate a method with `@Tool`; the annotation processor validates it during compilation (public method, documented `@ToolParam` on every parameter, unique tool name across the compilation, types that map to JSON Schema *and* that Jackson can actually deserialize — records, accessible no-arg constructors, or `@JsonCreator`; no interfaces, abstract types, or non-static inner classes; real parameter names via `-parameters`). Violations are build errors. The generated `META-INF/axiom/tools/*.json` is the runtime's single source of truth — schemas are never re-derived by reflection at runtime.
 - **ReAct agent loop** — reason + act with self-correction: tool errors are fed back as observations so the agent replans instead of crashing.
 - **Structured typed output** — `agent.runFor(task, Invoice.class)` constrains the model to the JSON Schema generated from your POJO and deserializes it. Mismatches raise `StructuredOutputException`, never silent corruption.
 - **Human-in-the-loop** — `requiresApproval = true` on any tool; denied calls are reported back so the agent replans.
 - **Tool timeouts** — per-tool `timeoutSeconds`; hanging tools are cancelled and reported, never wedging the run.
 - **Conversation memory** — pluggable `Memory` (bundled `SlidingWindowMemory`) gives multi-turn conversations without manual message management.
 - **Full-fidelity events** — every LLM call, tool call, approval, budget charge, and result emits a typed `AgentEvent`. Tracing, UIs, and logging plug in with one listener.
-- **Resilience** — `RetryingLlmClient` with exponential backoff + jitter for transient provider failures (client errors are never retried).
-- **Response caching** — `CachingLlmClient` serves identical requests from a content-hash key: deterministic runs, free replays, offline CI.
+- **Resilience** — `RetryingLlmClient` with exponential backoff + jitter for transient failures (HTTP 429 honors `Retry-After`, 5xx and network blips retried; other 4xx never retried). Streaming retries buffer each attempt and emit only the successful attempt's tokens.
+- **Response caching** — `CachingLlmClient` serves identical requests from a content-hash key: deterministic runs, free replays, offline CI. Streaming responses are cached with their token chunks and replayed chunk-by-chunk, so cache hits are indistinguishable from live streams.
 - **Guardrails** — policy checks on inputs and outputs: block, or redact and continue (`KeywordBlocklistGuardrail`, `PiiRedactionGuardrail` bundled).
 - **Observability exporters** — `JsonLinesExporter` (one JSON line per event, `jq`-queryable) and `MetricsReporter` (live counters for dashboards).
 - **Provider-agnostic** — any OpenAI-compatible endpoint: OpenAI, Azure, Ollama, vLLM, LM Studio, Together…
@@ -137,11 +137,36 @@ try {
 
 Every LLM call is charged; breaching a limit throws `BudgetExceededException` (carrying the full snapshot). `BudgetUpdated` events fire after every call — even the breaching one — so UIs can render live cost meters. Budgets are thread-safe and shareable across a supervisor team.
 
+## v0.5 — what's new
+
+A correctness release: every claim the framework makes about reliability is now enforced, not documented.
+
+### Compile-time schemas are the single source of truth
+
+The annotation processor no longer just generates `META-INF/axiom/tools/*.json` for tooling — `ToolRegistry` reads that artifact at runtime instead of re-deriving schemas by reflection (reflection remains only as a fallback for holders compiled without the processor, and `SchemaDriftTest` pins the two mappings against each other over a 19-type matrix). The processor also got stricter:
+
+- **Unique tool names** — a name used by two holders in one compilation is a build error (the runtime registry is name-keyed; this caught real collisions in Axiom's own sources).
+- **Jackson-deserializable parameters** — interfaces, abstract types, non-static inner classes, and POJOs with no accessible no-arg constructor / `@JsonCreator` / record canonical constructor are build errors, not 2 AM surprises.
+- **Return types validated too** — observations are serialized from return values, so provably broken return types fail the build.
+- **Collision-proof schema artifacts** — generated schemas live at `META-INF/axiom/tools/<binary-name>.json` (e.g. `dev/axiom/bench/BenchMain$CalcTools.json`), so two holders that happen to share a simple class name can never overwrite each other's schemas; the runtime verifies the artifact's `class` field before trusting it.
+
+### Honest streaming retries and caching
+
+`RetryingLlmClient.chatStream` now actually retries: each attempt's tokens are buffered and only the successful attempt's tokens reach the listener — a failed attempt's partial stream never leaks. HTTP 429 is retried with the provider's `Retry-After` honored (seconds or HTTP-date, capped at 10 minutes); other 4xx are never retried. `CachingLlmClient` caches streaming responses with their token chunks and replays them on hits; legacy or corrupt entries are treated as misses, never crashes.
+
+### Exactly-once durable side effects
+
+Every tool execution is wrapped in a side-effect ledger: `tool_call_started` is journaled before the tool body runs, `tool_call_completed` after it returns. Resume replays completed calls (never re-executes), re-executes crash-window calls **only** for tools declared `@Tool(idempotent = true)`, and aborts with `DurableException` naming the ambiguous call otherwise — a double side effect is never applied silently. Old journals resume unchanged.
+
+### Evals grade behavior, not just outputs
+
+`Trajectory` captures which tools were called, in what order, with which arguments, from agent events. `Scorers.calledTool` / `calledInOrder` / `toolArgsMatch` / `neverCalledTool` compose with output scorers via `Scorers.allOf`; trajectory scorers fail with an explanation (never pass vacuously) when no trajectory was captured. LLM-judge verdicts are cached by task/output hash, and `EvalGate.assertNoRegression` fails CI on score drops, pass→fail flips, and new failing cases.
+
 ## v0.4 — what's new
 
 ### Resilience (`dev.axiom.resilience`)
 
-Transient provider failures (rate limits, 5xx, network blips) shouldn't kill a run. `RetryingLlmClient` wraps any client with exponential backoff + jitter; client errors (HTTP 4xx) are never retried:
+Transient provider failures (rate limits, 5xx, network blips) shouldn't kill a run. `RetryingLlmClient` wraps any client with exponential backoff + jitter. HTTP 429 is retried with the provider's `Retry-After` hint honored (capped at 10 minutes); 5xx and network errors are retried; other 4xx are never retried. Streaming retries buffer each attempt's tokens and emit only the successful attempt's — a failed attempt's partial tokens never leak to the caller:
 
 ```java
 var client = new RetryingLlmClient(
@@ -151,7 +176,7 @@ var client = new RetryingLlmClient(
 
 ### Response caching (`dev.axiom.cache`)
 
-Identical requests (same model, messages, tools, options) hit a content-hash key instead of the provider. Deterministic runs, free replays, offline CI:
+Identical requests (same model, messages, tools, options) hit a content-hash key instead of the provider. Streaming responses are stored with their token chunks: a cache hit replays the stored chunks in order, so callers can't distinguish a hit from a live stream except by speed. Entries written by older versions (no chunks) or by non-streaming calls are treated as misses and rewritten — never served stale, never a crash:
 
 ```java
 var client = new CachingLlmClient(
@@ -214,7 +239,7 @@ AgentResult result = resumed.result();
 Semantics, stated plainly:
 
 - **Completed tool calls are exactly-once from Axiom's perspective** — their results were journaled, so resume replays them and never calls the tool again.
-- **In-flight calls are at-least-once** — a call requested but not finished before the crash is re-executed on resume. If the tool has external side effects, make it idempotent (a future API will propagate stable idempotency keys).
+- **The crash window is explicit, never silent** — every tool execution is wrapped in a side-effect ledger: `tool_call_started` is journaled before the tool body runs, `tool_call_completed` after it returns (error observations count as completions). A call that started but never completed *may or may not* have executed. Resume re-executes it **only** when the tool is declared `@Tool(idempotent = true)`; otherwise resume aborts with `DurableException` naming the ambiguous call instead of risking a double side effect. Idempotency is declared by the tool author, never inferred; the default is `false`.
 - **Token streams are ephemeral** — `StreamToken` events are delivered live but never journaled; the journal only records complete turns, so resume never acts on a half-received response.
 
 `AgentRun.listRuns(root)` lists crashed-but-resumable runs. Config-less recovery rebuilds the agent from the journal's recorded model and no-arg tool holders; synthetic tools (MCP/A2A/team) need their `AgentConfig` rebuilt explicitly.
@@ -241,7 +266,30 @@ report.save(Path.of("evals/report.json"));
 // Catch regressions against a baseline:
 EvalDiff diff = EvalReport.load(Path.of("evals/baseline.json")).diff(report);
 if (diff.hasRegressions()) System.out.println(diff);   // pass_to_fail, score_drop > 0.05
+
+// …or gate CI directly: EvalGate.assertNoRegression(report, baseline)
+// throws EvalGateException on any regression (new failing cases included).
 ```
+
+Trajectory scorers grade *behavior*, not just outputs — which tools were called, in what order, with which arguments, and what was forbidden:
+
+```java
+// Capture the tool-call trajectory from agent events:
+List<AgentEvent> events = new CopyOnWriteArrayList<>();
+var agent = Axiom.agent(AgentConfig.builder().onEvent(events::add)/* … */.build());
+var factory = EvalRunner.AgentFactory.recording(agent, events);
+
+EvalCase.of("uses-calculator", "What is 17*23?", String.class,
+    Scorers.allOf(
+        Scorers.calledTool("multiply"),                  // was the tool called?
+        Scorers.calledInOrder("multiply"),               // exact call order
+        Scorers.toolArgsMatch("multiply",                // with which arguments?
+            args -> Integer.valueOf(17).equals(args.get("x"))
+                 && Integer.valueOf(23).equals(args.get("y"))),
+        Scorers.neverCalledTool("delete_everything")));  // forbidden tools
+```
+
+Trajectory and output scorers compose on one case; LLM-judge verdicts are cached by task/output hash so re-runs are free. `EvalGate` fails CI on regressions: any case whose score dropped beyond tolerance, any pass→fail flip, and any *new* case that fails. Cases already failing in the baseline aren't regressions — fix them, don't gate on them.
 
 Built-in scorers: `exactMatch`, `exactMatchIgnoreCase`, `containsAll`, `parsesAs` (schema-conformance backstop), `llmJudge`. Every case records pass/fail, score, explanation, prompt/completion tokens, cost, latency, and error detail. Reports persist as JSON.
 
@@ -297,13 +345,16 @@ GAIA-style and SWE-bench-style runners that record machine-readable receipts —
 
 ```bash
 # Offline / deterministic (default): scripted model fixtures, REAL tool execution
-java -cp "target/axiom-0.4.0.jar:lib/*" dev.axiom.bench.BenchMain
+java -cp "target/axiom-0.5.0.jar:lib/*" dev.axiom.bench.BenchMain
 # -> benchmarks/receipts/receipt-fixture-<timestamp>.json
 
-# Live: against a real model
-AXIOM_BENCH_MODEL=gpt-4o-mini OPENAI_API_KEY=sk-... \
-  java -cp "target/axiom-0.4.0.jar:lib/*" dev.axiom.bench.BenchMain --live
+# Live: against a real model, free or paid
+AXIOM_BENCH_PROVIDER=gemini GEMINI_API_KEY=... \
+  java -cp "target/axiom-0.5.0.jar:lib/*" dev.axiom.bench.BenchMain --live
+# -> benchmarks/receipts/receipt-live-gemini-<timestamp>.json
 ```
+
+`AXIOM_BENCH_PROVIDER` picks the endpoint: `gemini` (free, no card), `openrouter` (free `:free` models), `groq` (free tier), `ollama` (local, no key), or `openai` (paid). `AXIOM_BENCH_MODEL` overrides the default model; `AXIOM_BENCH_DELAY_MS` overrides the per-provider pacing between tasks. Keys come from environment variables only — never paste one into chat or commit one. Live runs wrap the client in 429-aware retries (`Retry-After` honored) and every live receipt carries a written honesty disclosure: this is a **4-task representative subset, not a GAIA/SWE-bench score**, with the provider tier, pacing, and $0 cost basis recorded.
 
 ```
 Benchmark receipt: axiom 0.3.0 | model=fixture mode=fixture
@@ -350,7 +401,7 @@ If `webSearch`'s signature and its schema ever disagree, the build fails. That's
 No Maven required (a `pom.xml` is included for standard environments):
 
 ```bash
-./build.sh   # compiles, runs all tests, packages target/axiom-0.4.0.jar
+./build.sh   # compiles, runs all tests, packages target/axiom-0.5.0.jar
 ```
 
 Requirements: JDK 21 (auto-detected at `~/workspace/tools/jdk-21`).
@@ -359,13 +410,13 @@ Requirements: JDK 21 (auto-detected at `~/workspace/tools/jdk-21`).
 
 ```bash
 export OPENAI_API_KEY=sk-...
-java -cp "target/axiom-0.4.0.jar:lib/*" dev.axiom.demo.DemoAgent "What is 17*23, and save the answer as a note?"
+java -cp "target/axiom-0.5.0.jar:lib/*" dev.axiom.demo.DemoAgent "What is 17*23, and save the answer as a note?"
 ```
 
 ## Roadmap
 
-- **v0.5**: durable idempotency keys for tool side effects, A2A authentication/push notifications, eval dataset versioning, hosted benchmark leaderboard
+- **v0.6**: A2A authentication/push notifications, eval dataset versioning, hosted benchmark leaderboard, free-tier benchmark runner
 
 ## Status
 
-v0.4.0 — LLM retry with backoff, response caching, guardrails, observability exporters, runnable examples. 129 tests green.
+v0.5.0 — honest streaming retries (buffer-per-attempt, `Retry-After`), streaming cache with token replay, exactly-once durable side-effect ledger with `@Tool(idempotent)`, compile-time schema single-source-of-truth (unique tool names, Jackson-deserializability checks, runtime reads the generated artifact), trajectory eval scorers + `EvalGate` CI gate, free-tier benchmark path (`gemini`/`openrouter`/`groq`/`ollama`, paced, $0 receipts with honesty notes). 177 tests green.

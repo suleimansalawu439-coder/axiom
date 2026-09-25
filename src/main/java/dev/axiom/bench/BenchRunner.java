@@ -35,12 +35,37 @@ public final class BenchRunner {
     public static BenchReceipt run(List<BenchTask> tasks,
                                    BiFunction<BenchTask, Path, BenchAgent> agentFactory,
                                    ModelPrices prices, String model, String mode) {
+        return run(tasks, agentFactory, prices, model, mode, 0, "");
+    }
+
+    /**
+     * Full run with pacing and receipt notes.
+     *
+     * @param pacingMs pause between tasks (never before the first), so
+     *                 free-tier rate limits are respected instead of tripped
+     * @param notes    honesty disclosure recorded verbatim in the receipt
+     *                 (subset scope, provider tier, cost basis, limitations)
+     */
+    public static BenchReceipt run(List<BenchTask> tasks,
+                                   BiFunction<BenchTask, Path, BenchAgent> agentFactory,
+                                   ModelPrices prices, String model, String mode,
+                                   long pacingMs, String notes) {
         List<TaskResult> results = new ArrayList<>();
+        boolean first = true;
         for (BenchTask task : tasks) {
+            if (!first && pacingMs > 0) {
+                try {
+                    Thread.sleep(pacingMs);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new BenchException("Benchmark pacing interrupted", e);
+                }
+            }
+            first = false;
             results.add(runOne(task, agentFactory, prices, model));
         }
         return new BenchReceipt("axiom", Version.CURRENT, model, mode,
-            Instant.now(), results);
+            Instant.now(), results, notes == null ? "" : notes);
     }
 
     private static TaskResult runOne(BenchTask task,

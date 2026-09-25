@@ -29,8 +29,10 @@ import java.util.Map;
  *
  * // Later (same or different process): rebuild and continue. Tool calls that
  * // completed before the crash are replayed from the journal — never
- * // re-executed. Only tool calls that were requested but never finished run
- * // again (at-least-once).
+ * // re-executed (exactly-once). A call that started but never completed is
+ * // re-executed only if its tool is declared idempotent=true; otherwise
+ * // resume refuses loudly instead of risking a double side effect. Calls
+ * // that never started run again (at-least-once).
  * AgentRun resumed = AgentRun.resumeFrom(Path.of("runs"), checkpointId, config);
  * AgentResult result2 = resumed.result();
  * }</pre>
@@ -108,8 +110,12 @@ public final class AgentRun implements AutoCloseable {
 
     /**
      * Resume a crashed run. Rebuilds the transcript from the journal, replays
-     * completed tool calls from their recorded results, re-executes unfinished
-     * ones, and continues the ReAct loop.
+     * completed tool calls from their recorded results (exactly-once),
+     * re-executes crash-window calls only for tools declared
+     * {@code idempotent=true} (aborting with {@link DurableException} for
+     * non-idempotent tools instead of risking a double side effect), and
+     * re-executes never-started calls (at-least-once) before continuing the
+     * ReAct loop.
      *
      * @param journalRoot  root passed to {@code withJournalRoot(...)}
      * @param checkpointId id returned by {@link #checkpoint()}

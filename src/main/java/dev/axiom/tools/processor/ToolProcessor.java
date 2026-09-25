@@ -6,6 +6,7 @@ import dev.axiom.tools.ToolParam;
 import javax.annotation.processing.*;
 import javax.lang.model.SourceVersion;
 import javax.lang.model.element.*;
+import javax.lang.model.type.DeclaredType;
 import javax.lang.model.type.TypeKind;
 import javax.lang.model.type.TypeMirror;
 import javax.tools.Diagnostic;
@@ -22,18 +23,40 @@ import java.util.*;
  * <ul>
  *   <li>Every {@code @Tool} method must be {@code public} and every parameter
  *       must carry {@code @ToolParam} — otherwise compilation <b>fails</b>.</li>
- *   <li>Parameter types must be mappable to JSON Schema — otherwise
+ *   <li>Tool names must be unique across the compilation — otherwise
  *       compilation <b>fails</b>.</li>
+ *   <li>Parameter types must be mappable to JSON Schema <em>and</em>
+ *       Jackson-deserializable (record, accessible no-arg constructor, or
+ *       {@code @JsonCreator}; no interfaces, abstract types, or non-static
+ *       inner classes) — otherwise compilation <b>fails</b>. Return types get
+ *       the same treatment, so observations can never be garbage.</li>
  *   <li>Parameter names must be real (compiled with {@code -parameters});
  *       synthetic names like {@code arg0} are a compile <b>error</b>, because
  *       the runtime registry matches LLM arguments by name.</li>
  *   <li>On success, a JSON schema document is generated to
- *       {@code META-INF/axiom/tools/&lt;ClassName&gt;.json} for tooling.</li>
+ *       {@code META-INF/axiom/tools/<binary-name-with-/-separators>.json}
+ *       (e.g. {@code dev/axiom/bench/BenchMain$CalcTools.json}) — and the
+ *       runtime {@code ToolRegistry} reads that artifact as the single
+ *       source of truth instead of re-deriving schemas by reflection.</li>
  * </ul>
  */
 @SupportedAnnotationTypes("dev.axiom.tools.Tool")
 @SupportedSourceVersion(SourceVersion.RELEASE_21)
 public class ToolProcessor extends AbstractProcessor {
+
+    /** Tool name -> qualified holder class, for cross-class duplicate detection. */
+    private final Map<String, String> toolNames = new LinkedHashMap<>();
+
+    /**
+     * JDK types Jackson handles natively without bean introspection, so they
+     * need no constructor/record/@JsonCreator check.
+     */
+    private static final Set<String> JACKSON_NATIVE = Set.of(
+        "java.util.UUID", "java.net.URI", "java.net.URL",
+        "java.math.BigInteger",
+        "java.time.Instant", "java.time.LocalDate", "java.time.LocalDateTime",
+        "java.time.OffsetDateTime", "java.time.ZonedDateTime", "java.time.Duration",
+        "java.util.Date", "java.sql.Date", "java.sql.Timestamp");
 
     @Override
     public boolean process(Set<? extends TypeElement> annotations, RoundEnvironment roundEnv) {
@@ -53,6 +76,14 @@ public class ToolProcessor extends AbstractProcessor {
 
             String toolName = tool.name().isBlank()
                 ? method.getSimpleName().toString() : tool.name();
+            String holderClass = processingEnv.getElementUtils()
+                .getBinaryName((TypeElement) method.getEnclosingElement()).toString();
+            String prevHolder = toolNames.putIfAbsent(toolName, holderClass);
+            if (prevHolder != null) {
+                error(method, ("@Tool name '%s' is already used by %s. Tool names "
+                    + "must be unique across the compilation — the runtime registry "
+                    + "is keyed by name.").formatted(toolName, prevHolder));
+            }
             if (tool.description().isBlank()) {
                 error(method, "@Tool '%s' must declare a non-blank description".formatted(toolName));
             }
@@ -73,7 +104,7 @@ public class ToolProcessor extends AbstractProcessor {
                         + "Every parameter must be documented for the LLM.").formatted(paramName, toolName));
                     continue;
                 }
-                String jsonType = jsonType(param.asType(), param);
+                String jsonType = jsonType(param.asType(), param, "parameter");
                 if (jsonType == null) continue; // error already reported
                 Map<String, Object> prop = new LinkedHashMap<>();
                 prop.put("type", jsonType);
@@ -92,10 +123,18 @@ public class ToolProcessor extends AbstractProcessor {
             Map<String, Object> functionDef = Map.of(
                 "name", toolName,
                 "description", tool.description(),
-                "parameters", schema);
+                "parameters", schema,
+                "idempotent", tool.idempotent());
 
-            String className = ((TypeElement) method.getEnclosingElement()).getQualifiedName().toString();
-            schemasByClass.computeIfAbsent(className, k -> new ArrayList<>())
+            // Return types are serialized to observations via Jackson: a
+            // provably undeserializable/unserializable declared type fails the
+            // build instead of producing garbage observations at runtime.
+            TypeMirror ret = method.getReturnType();
+            if (ret.getKind() == TypeKind.DECLARED) {
+                jsonType(ret, method, "return type");
+            }
+
+            schemasByClass.computeIfAbsent(holderClass, k -> new ArrayList<>())
                 .add(toJson(functionDef));
         }
 
@@ -107,7 +146,14 @@ public class ToolProcessor extends AbstractProcessor {
 
     // ------------------------------------------------------------------
 
-    private String jsonType(TypeMirror type, Element element) {
+    /**
+     * Map a Java type to its JSON Schema type, failing the build for anything
+     * the runtime could not faithfully deserialize. This mapping is the
+     * single source of truth: {@link dev.axiom.tools.ToolRegistry} reuses the
+     * generated {@code META-INF/axiom/tools/*.json} artifact at runtime, and
+     * {@code SchemaDriftTest} guards the reflective fallback against drift.
+     */
+    private String jsonType(TypeMirror type, Element element, String role) {
         TypeKind kind = type.getKind();
         String name = type.toString();
         return switch (kind) {
@@ -116,30 +162,106 @@ public class ToolProcessor extends AbstractProcessor {
             case FLOAT, DOUBLE -> "number";
             case CHAR -> "string";
             case DECLARED -> {
-                if (name.equals("java.lang.String") || name.equals("java.lang.Character")) yield "string";
-                if (name.equals("java.lang.Boolean")) yield "boolean";
-                if (name.equals("java.lang.Integer") || name.equals("java.lang.Long")
-                    || name.equals("java.lang.Short") || name.equals("java.lang.Byte")) yield "integer";
-                if (name.equals("java.lang.Double") || name.equals("java.lang.Float")
-                    || name.equals("java.math.BigDecimal")) yield "number";
-                if (name.startsWith("java.util.List") || name.startsWith("java.util.Set")
-                    || name.startsWith("java.util.Collection")) yield "array";
-                if (name.startsWith("java.util.Map")) yield "object";
-                // Any other declared type (POJO) maps to object via Jackson.
+                DeclaredType declared = (DeclaredType) type;
+                Element el = declared.asElement();
+                String qname = el instanceof TypeElement te
+                    ? te.getQualifiedName().toString() : name;
+                if (qname.equals("java.lang.String") || qname.equals("java.lang.Character")) yield "string";
+                if (qname.equals("java.lang.Boolean")) yield "boolean";
+                if (qname.equals("java.lang.Integer") || qname.equals("java.lang.Long")
+                    || qname.equals("java.lang.Short") || qname.equals("java.lang.Byte")) yield "integer";
+                if (qname.equals("java.lang.Double") || qname.equals("java.lang.Float")
+                    || qname.equals("java.math.BigDecimal")) yield "number";
+                if (qname.equals("java.lang.Object")) {
+                    error(element, "@Tool %s of type Object is not allowed — the LLM needs a concrete type.".formatted(role));
+                    yield null;
+                }
+                if (isSubtypeOf(type, "java.util.Collection")) yield "array";
+                if (isSubtypeOf(type, "java.util.Map")) yield "object";
+                // Any other declared type (POJO) maps to object via Jackson —
+                // but only if Jackson can actually construct it.
+                if (el instanceof TypeElement te && !checkReadable(te, element, role)) yield null;
                 yield "object";
             }
             case ARRAY -> "array";
             default -> {
-                error(element, "Unsupported @Tool parameter type: " + name
-                    + ". Use String, primitives/wrappers, List, arrays, Map, or POJOs.");
+                error(element, "Unsupported @Tool %s type: %s. Use String, primitives/wrappers, List, arrays, Map, or POJOs.".formatted(role, name));
                 yield null;
             }
         };
     }
 
+    private boolean isSubtypeOf(TypeMirror type, String qualified) {
+        TypeElement target = processingEnv.getElementUtils().getTypeElement(qualified);
+        if (target == null) return false;
+        return processingEnv.getTypeUtils().isAssignable(
+            processingEnv.getTypeUtils().erasure(type), target.asType());
+    }
+
+    /**
+     * Verify Jackson can construct the type from LLM JSON. Tool parameters
+     * are <em>deserialized</em>; a type Jackson cannot instantiate passes no
+     * silent runtime failure — it fails the build here instead.
+     */
+    private boolean checkReadable(TypeElement te, Element blame, String role) {
+        String qname = te.getQualifiedName().toString();
+        if (JACKSON_NATIVE.contains(qname)) return true;
+        ElementKind kind = te.getKind();
+        if (kind == ElementKind.ENUM || kind == ElementKind.RECORD) return true;
+        if (kind == ElementKind.INTERFACE || kind == ElementKind.ANNOTATION_TYPE) {
+            error(blame, ("@Tool %s type %s is an interface — Jackson cannot instantiate it. "
+                + "Use a concrete class or record.").formatted(role, qname));
+            return false;
+        }
+        if (te.getModifiers().contains(Modifier.ABSTRACT)) {
+            error(blame, ("@Tool %s type %s is abstract — Jackson cannot instantiate it. "
+                + "Use a concrete class or record.").formatted(role, qname));
+            return false;
+        }
+        if (te.getNestingKind() == NestingKind.MEMBER
+                && !te.getModifiers().contains(Modifier.STATIC)) {
+            error(blame, ("@Tool %s type %s is a non-static inner class — Jackson cannot instantiate it. "
+                + "Make it static or a top-level class.").formatted(role, qname));
+            return false;
+        }
+        if (hasJsonCreator(te)) return true;
+        if (hasAccessibleNoArgConstructor(te)) return true;
+        error(blame, ("@Tool %s type %s is not Jackson-deserializable: no accessible no-arg constructor, "
+            + "no @JsonCreator, and not a record. Add one of the three.").formatted(role, qname));
+        return false;
+    }
+
+    private boolean hasJsonCreator(TypeElement te) {
+        for (Element e : te.getEnclosedElements()) {
+            ElementKind k = e.getKind();
+            if (k != ElementKind.CONSTRUCTOR && k != ElementKind.METHOD) continue;
+            for (AnnotationMirror am : e.getAnnotationMirrors()) {
+                String annName = ((TypeElement) am.getAnnotationType().asElement())
+                    .getQualifiedName().toString();
+                if (annName.endsWith(".JsonCreator") || annName.equals("JsonCreator")) return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean hasAccessibleNoArgConstructor(TypeElement te) {
+        boolean sawCtor = false;
+        for (Element e : te.getEnclosedElements()) {
+            if (e.getKind() != ElementKind.CONSTRUCTOR) continue;
+            sawCtor = true;
+            ExecutableElement ctor = (ExecutableElement) e;
+            if (ctor.getParameters().isEmpty()
+                    && !ctor.getModifiers().contains(Modifier.PRIVATE)) {
+                return true;
+            }
+        }
+        return !sawCtor; // implicit default constructor
+    }
+
     private void writeSchemaResource(String className, List<String> functionDefs) {
-        String simpleName = className.substring(className.lastIndexOf('.') + 1);
-        String resource = "META-INF/axiom/tools/" + simpleName + ".json";
+        // Binary-name-based path: unique per class, including nested classes
+        // (dev.axiom.bench.BenchMain$CalcTools -> dev/axiom/bench/BenchMain$CalcTools.json).
+        String resource = "META-INF/axiom/tools/" + className.replace('.', '/') + ".json";
         String json = "{\n  \"class\": \"" + className + "\",\n  \"tools\": [\n"
             + String.join(",\n", functionDefs) + "\n  ]\n}\n";
         try {

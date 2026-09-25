@@ -50,27 +50,13 @@ javac -parameters -d target/test-classes -cp "$CP_TEST" -processorpath target/cl
   $(find src/test/java -name "*.java")
 
 echo "==> Running tests..."
+# Classpath scan: every *Test class under target/test-classes runs. Never a
+# hardcoded list (new test classes must not be silently skipped).
 java -jar lib/junit-platform-console-standalone-1.10.3.jar execute \
   --class-path "$CP_TEST" \
-  --select-class dev.axiom.tools.ToolRegistryTest \
-  --select-class dev.axiom.tools.SubprocessToolTest \
-  --select-class dev.axiom.agent.ReActAgentTest \
-  --select-class dev.axiom.llm.OpenAiCompatibleClientTest \
-  --select-class dev.axiom.mcp.McpClientTest \
-  --select-class dev.axiom.teams.SupervisorTeamTest \
-  --select-class dev.axiom.memory.VectorMemoryTest \
-  --select-class dev.axiom.memory.OpenAiEmbeddingsTest \
-  --select-class dev.axiom.budget.BudgetTest \
-  --select-class dev.axiom.llm.StreamingClientTest \
-  --select-class dev.axiom.durable.DurableRunTest \
-  --select-class dev.axiom.eval.EvalHarnessTest \
-  --select-class dev.axiom.a2a.A2aTest \
-  --select-class dev.axiom.bench.BenchRunnerTest \
-  --select-class dev.axiom.resilience.ResilienceTest \
-  --select-class dev.axiom.cache.CacheTest \
-  --select-class dev.axiom.guardrails.GuardrailTest \
-  --select-class dev.axiom.observe.ObserveTest 2>&1 | tail -12
+  --scan-class-path=target/test-classes \
+  --include-classname='.*Test' 2>&1 | tail -12
 
-echo "==> Packaging axiom-0.4.0.jar..."
-jar --create --file target/axiom-0.4.0.jar -C target/classes .
-echo "Done: target/axiom-0.4.0.jar"
+echo "==> Packaging axiom-0.5.0.jar..."
+jar --create --file target/axiom-0.5.0.jar -C target/classes .
+echo "Done: target/axiom-0.5.0.jar"

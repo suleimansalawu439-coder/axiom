@@ -57,7 +57,7 @@ class StreamingClientTest {
     }
 
     static class CalcTools {
-        @Tool(description = "Multiply two numbers")
+        @Tool(name = "sc_multiply", description = "Multiply two numbers")
         public int multiply(@ToolParam(description = "x") int x,
                             @ToolParam(description = "y") int y) {
             return x * y;
@@ -68,7 +68,7 @@ class StreamingClientTest {
     void reactLoopEmitsStreamTokensButActsOnCompleteTurn() {
         var llm = new FakeStreamingLlm()
             .enqueue(new ChatResponse("I'll multiply.",
-                    List.of(new ToolCallRequest("c1", "multiply", java.util.Map.of("x", 6, "y", 7))),
+                    List.of(new ToolCallRequest("c1", "sc_multiply", java.util.Map.of("x", 6, "y", 7))),
                     new ChatResponse.TokenUsage(10, 5, 15)),
                 "I'll ", "multiply.")
             .enqueue(new ChatResponse("The answer is 42.", List.of(),
@@ -133,7 +133,7 @@ class StreamingClientTest {
             "data: " + chunk("{\"content\":\" world\"}") + "\n\n",
             // tool call arguments arrive fragmented across chunks
             "data: " + chunk("{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\","
-                + "\"function\":{\"name\":\"multiply\",\"arguments\":\"{\\\"x\\\":\"}}]}") + "\n\n",
+                + "\"function\":{\"name\":\"sc_multiply\",\"arguments\":\"{\\\"x\\\":\"}}]}") + "\n\n",
             "data: " + chunk("{\"tool_calls\":[{\"index\":0,"
                 + "\"function\":{\"arguments\":\"6,\\\"y\\\":7}\"}}]}") + "\n\n",
             // usage-only final chunk (stream_options include_usage)
@@ -155,7 +155,7 @@ class StreamingClientTest {
         assertTrue(resp.hasToolCalls());
         assertEquals(1, resp.toolCalls().size());
         assertEquals("call_1", resp.toolCalls().get(0).id());
-        assertEquals("multiply", resp.toolCalls().get(0).name());
+        assertEquals("sc_multiply", resp.toolCalls().get(0).name());
         assertEquals(6, resp.toolCalls().get(0).arguments().get("x"));
         assertEquals(7, resp.toolCalls().get(0).arguments().get("y"));
         assertEquals(60, resp.usage().totalTokens());

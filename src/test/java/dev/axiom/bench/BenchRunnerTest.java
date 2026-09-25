@@ -60,7 +60,7 @@ class BenchRunnerTest {
         assertEquals(0, receipt.failed());
         assertEquals("fixture", receipt.mode());
         assertEquals("axiom", receipt.framework());
-        assertEquals("0.4.0", receipt.frameworkVersion());
+        assertEquals("0.5.0", receipt.frameworkVersion());
         // Tokens and latency were recorded for every task.
         assertTrue(receipt.results().stream().allMatch(r -> r.latencyMs() >= 0));
     }
@@ -112,7 +112,7 @@ class BenchRunnerTest {
 
         Map<String, Object> m = JSON.readValue(p.toFile(), Map.class);
         assertEquals("axiom", m.get("framework"));
-        assertEquals("0.4.0", m.get("frameworkVersion"));
+        assertEquals("0.5.0", m.get("frameworkVersion"));
         assertEquals("fixture", m.get("mode"));
         assertEquals(1, ((Map<String, Object>) m.get("totals")).get("passed"));
         List<Map<String, Object>> results = (List<Map<String, Object>>) m.get("results");
@@ -121,5 +121,38 @@ class BenchRunnerTest {
         assertEquals(true, results.get(0).get("passed"));
         assertTrue(results.get(0).containsKey("promptTokens"));
         assertTrue(results.get(0).containsKey("latencyMs"));
+    }
+
+    @Test
+    void freeTierPresetsResolve() {
+        BenchProvider.Preset gemini = BenchProvider.of("gemini");
+        assertEquals("https://generativelanguage.googleapis.com/v1beta/openai", gemini.baseUrl());
+        assertEquals("GEMINI_API_KEY", gemini.apiKeyEnv());
+        assertTrue(gemini.needsKey());
+
+        BenchProvider.Preset ollama = BenchProvider.of("ollama");
+        assertFalse(ollama.needsKey());
+
+        assertThrows(BenchException.class, () -> BenchProvider.of("nope"));
+    }
+
+    @Test
+    void pacingAndNotesLandInReceipt() {
+        List<BenchTask> tasks = List.of(
+            BenchTask.gaia("gaia-arithmetic", "What is 17 * 23 + 5? Reply with just the number.", "396"),
+            BenchTask.gaia("gaia-two-step", "What is 6 * 7? Then add 8 to your result. Reply with just the final number.", "50"));
+        long pacingMs = 250;
+        long start = System.currentTimeMillis();
+        BenchReceipt receipt = BenchRunner.run(tasks, factory(),
+            ModelPrices.defaults(), "gemini-2.0-flash", "live-gemini", pacingMs,
+            "honesty disclosure for tests");
+        long elapsed = System.currentTimeMillis() - start;
+
+        // One pause between the two tasks.
+        assertTrue(elapsed >= pacingMs,
+            "expected at least " + pacingMs + "ms of pacing, took " + elapsed + "ms");
+        assertEquals("live-gemini", receipt.mode());
+        assertEquals("honesty disclosure for tests", receipt.notes());
+        assertTrue(receipt.toString().contains("honesty disclosure for tests"));
     }
 }

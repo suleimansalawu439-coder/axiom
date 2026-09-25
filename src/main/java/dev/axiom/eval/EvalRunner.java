@@ -1,6 +1,7 @@
 package dev.axiom.eval;
 
 import dev.axiom.Axiom;
+import dev.axiom.agent.AgentEvent;
 import dev.axiom.agent.ReActAgent;
 import dev.axiom.budget.ModelPrices;
 
@@ -23,12 +24,58 @@ public final class EvalRunner {
     public interface AgentFactory {
         <T> ReActAgent.TypedRun<T> runFor(String task, Class<T> outputType);
 
+        /**
+         * Run the case and capture the tool-call trajectory alongside the
+         * typed output. The default implementation delegates to
+         * {@link #runFor} with an {@link Trajectory#empty() empty} trajectory,
+         * so existing factories keep working unchanged; override it (or use
+         * {@link #recording}) to grade agent behavior, not just final
+         * outputs.
+         */
+        default <T> TrajectoryRun<T> runForWithTrajectory(String task, Class<T> outputType) {
+            return new TrajectoryRun<>(runFor(task, outputType), Trajectory.empty());
+        }
+
         /** Adapt an {@link Axiom.Agent}; usage and latency are measured per case. */
         static AgentFactory of(Axiom.Agent agent) {
             return new AgentFactory() {
                 @Override
                 public <T> ReActAgent.TypedRun<T> runFor(String task, Class<T> outputType) {
                     return agent.runForWithStats(task, outputType);
+                }
+            };
+        }
+
+        /**
+         * Adapt an {@link Axiom.Agent} whose config records events into
+         * {@code eventSink} (e.g. via
+         * {@code AgentConfig.Builder.onEvent(eventSink::add)}). Each case
+         * clears the sink first, so the trajectory holds only that case's
+         * tool calls.
+         *
+         * <pre>{@code
+         * List<AgentEvent> events = new CopyOnWriteArrayList<>();
+         * var agent = Axiom.agent(AgentConfig.builder()
+         *     .onEvent(events::add)
+         *     ...build());
+         * var factory = AgentFactory.recording(agent, events);
+         * EvalReport report = EvalRunner.run(suite, factory, "gpt-4o-mini");
+         * }</pre>
+         */
+        static AgentFactory recording(Axiom.Agent agent, List<AgentEvent> eventSink) {
+            if (agent == null) throw new IllegalArgumentException("agent is required");
+            if (eventSink == null) throw new IllegalArgumentException("eventSink is required");
+            return new AgentFactory() {
+                @Override
+                public <T> ReActAgent.TypedRun<T> runFor(String task, Class<T> outputType) {
+                    return agent.runForWithStats(task, outputType);
+                }
+
+                @Override
+                public <T> TrajectoryRun<T> runForWithTrajectory(String task, Class<T> outputType) {
+                    eventSink.clear();
+                    ReActAgent.TypedRun<T> r = agent.runForWithStats(task, outputType);
+                    return new TrajectoryRun<>(r, Trajectory.fromEvents(List.copyOf(eventSink)));
                 }
             };
         }
@@ -54,10 +101,11 @@ public final class EvalRunner {
                                                     String model, ModelPrices prices) {
         long start = System.currentTimeMillis();
         try {
-            ReActAgent.TypedRun<T> r = factory.runFor(kase.task(), kase.expectedOutputType());
+            TrajectoryRun<T> t = factory.runForWithTrajectory(kase.task(), kase.expectedOutputType());
+            ReActAgent.TypedRun<T> r = t.run();
             long latencyMs = System.currentTimeMillis() - start;
             ScoreResult s = kase.scorer().score(r.value(),
-                new EvalContext(kase.task(), latencyMs, r.usage()));
+                new EvalContext(kase.task(), latencyMs, r.usage(), t.trajectory()));
             double cost = prices.costUsd(model,
                 r.usage().promptTokens(), r.usage().completionTokens()).orElse(0.0);
             return new EvalReport.CaseResult(kase.id(), s.passed(), s.score(),

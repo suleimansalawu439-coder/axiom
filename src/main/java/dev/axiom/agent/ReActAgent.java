@@ -17,10 +17,12 @@ import dev.axiom.tools.ToolRegistry;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.*;
 
 /**
@@ -74,9 +76,16 @@ public final class ReActAgent {
     /** A typed run: the coerced value plus the run's real token usage and latency. */
     public record TypedRun<T>(T value, ChatResponse.TokenUsage usage, long latencyMs) {}
 
-    /** The journal replay of a crashed run: rebuilt messages plus bookkeeping. */
+    /**
+     * The journal replay of a crashed run: rebuilt messages plus bookkeeping.
+     * {@code recordedResults} is keyed by idempotency key (see
+     * {@link #idempotencyKey(ToolCallRequest)}); {@code startedCallKeys} holds
+     * every key whose {@code tool_call_started} record was journaled, so
+     * resume can tell a completed call from a crash-window call.
+     */
     public record ResumeTranscript(List<ChatMessage> messages,
                                    Map<String, String> recordedResults,
+                                   Set<String> startedCallKeys,
                                    List<ToolCallRequest> pendingCalls,
                                    ChatResponse.TokenUsage totalUsage,
                                    int toolCallsMade,
@@ -158,9 +167,12 @@ public final class ReActAgent {
     /**
      * Resume a crashed run from its journal. The transcript is rebuilt from
      * journaled events; completed tool calls are replayed from their recorded
-     * results and never re-executed; tool calls that were requested but never
-     * finished are re-executed (at-least-once). New events continue to be
-     * appended to the same journal.
+     * results and never re-executed (exactly-once); tool calls that started
+     * but never completed are re-executed only when the tool is declared
+     * {@code idempotent=true} — otherwise resume aborts with
+     * {@link DurableException} instead of risking a double side effect; calls
+     * that never started are re-executed (at-least-once). New events continue
+     * to be appended to the same journal.
      */
     public AgentResult resume(RunJournal journal) {
         return resumeWithTranscript(journal).result();
@@ -181,7 +193,7 @@ public final class ReActAgent {
         int toolCallsMade = t.toolCallsMade();
         for (ToolCallRequest call : t.pendingCalls()) {
             toolCallsMade++;
-            String observation = executeToolCall(call, config.tools(), t.recordedResults());
+            String observation = executeResumedToolCall(call, config.tools(), t);
             messages.add(ChatMessage.toolResult(call.id(), call.name(), observation));
         }
         LoopState state = new LoopState(messages, t.lastIteration(), t.totalUsage(),
@@ -199,6 +211,7 @@ public final class ReActAgent {
     public ResumeTranscript replay(RunJournal journal) {
         List<ChatMessage> messages = new ArrayList<>();
         Map<String, String> recordedResults = new LinkedHashMap<>();
+        Set<String> startedCallKeys = new HashSet<>();
         List<ToolCallRequest> pending = new ArrayList<>();
         ChatResponse.TokenUsage totalUsage = ChatResponse.TokenUsage.empty();
         int toolCallsMade = 0;
@@ -206,12 +219,18 @@ public final class ReActAgent {
         boolean completed = false;
         AgentResult result = null;
         boolean sawStart = false;
+        String runId = journal.runId();
 
         for (RunJournal.Record record : journal.readAll()) {
             if (record instanceof RunJournal.RunStarted rs) {
                 sawStart = true;
                 messages.add(ChatMessage.system(config.systemPrompt()));
                 messages.add(ChatMessage.user(rs.task()));
+            } else if (record instanceof RunJournal.ToolCallStarted ts) {
+                startedCallKeys.add(ts.idempotencyKey());
+            } else if (record instanceof RunJournal.ToolCallCompleted tc) {
+                recordedResults.put(tc.idempotencyKey(), tc.result());
+                startedCallKeys.add(tc.idempotencyKey());
             } else if (record instanceof RunJournal.Event ev
                     && ev.event() instanceof AgentEvent.LlmResponse lr) {
                 lastIteration = lr.iteration();
@@ -221,7 +240,10 @@ public final class ReActAgent {
                 pending = new ArrayList<>(lr.response().toolCalls());
             } else if (record instanceof RunJournal.Event ev2
                     && ev2.event() instanceof AgentEvent.ToolCallFinished tf) {
-                recordedResults.put(tf.call().id(), tf.result());
+                // Legacy journals (pre side-effect ledger): a finished event
+                // is a completion. Synthesize the idempotency key the new
+                // ledger would have used so old journals resume unchanged.
+                recordedResults.putIfAbsent(runId + "#" + tf.call().id(), tf.result());
                 toolCallsMade++;
                 messages.add(ChatMessage.toolResult(tf.call().id(), tf.call().name(), tf.result()));
                 String finishedId = tf.call().id();
@@ -236,7 +258,8 @@ public final class ReActAgent {
             throw new DurableException("Journal has no run_started record: " + journal.dir());
         }
         return new ResumeTranscript(List.copyOf(messages), Map.copyOf(recordedResults),
-            List.copyOf(pending), totalUsage, toolCallsMade, lastIteration, completed, result);
+            Set.copyOf(startedCallKeys), List.copyOf(pending), totalUsage, toolCallsMade,
+            lastIteration, completed, result);
     }
 
     /** Snapshot recorded in the journal so a run can be rebuilt without the original config. */
@@ -402,14 +425,62 @@ public final class ReActAgent {
         }
     }
 
+    /**
+     * The idempotency key for one tool call: {@code runId + "#" + callId}.
+     *
+     * <p>Derived from the call id rather than the tool name + argument hash
+     * deliberately: the same tool with identical arguments may legitimately
+     * be called several times in one run (each call gets its own LLM-issued
+     * id), and the transcript pairs {@code tool_result} messages to calls by
+     * id. The run id scopes the key to this journal, so keys are stable
+     * across resume and unique across runs.
+     */
+    private String idempotencyKey(ToolCallRequest call) {
+        return (journal != null ? journal.runId() : "ephemeral") + "#" + call.id();
+    }
+
+    /**
+     * Execute a pending tool call during resume, applying the side-effect
+     * ledger semantics:
+     * <ul>
+     *   <li>Completed (key has a recorded result) → replay, never re-execute.</li>
+     *   <li>Crash window (key started, never completed) → re-execute only if
+     *       the tool is declared {@code idempotent=true}; otherwise throw
+     *       {@link DurableException} naming the ambiguous call instead of
+     *       risking a double side effect.</li>
+     *   <li>Never started → re-execute (at-least-once), as before.</li>
+     * </ul>
+     */
+    private String executeResumedToolCall(ToolCallRequest call, ToolRegistry registry,
+                                          ResumeTranscript t) {
+        String key = idempotencyKey(call);
+        if (!t.recordedResults().containsKey(key) && t.startedCallKeys().contains(key)) {
+            ToolDefinition def = registry.find(call.name()).orElse(null);
+            String defName = def != null ? def.name() : call.name();
+            if (def == null || !def.idempotent()) {
+                throw new DurableException((
+                    "Refusing to resume: tool call '%s' (tool '%s', arguments %s) started before "
+                    + "the crash (idempotency key '%s') but never completed, and the tool is not "
+                    + "declared idempotent. Re-executing it could apply its side effect twice. "
+                    + "Either mark the tool idempotent=true on its ToolDefinition if re-execution "
+                    + "with identical arguments is safe, or resolve the ambiguity manually "
+                    + "(inspect the journal at %s, then delete the run or complete the call by hand).")
+                    .formatted(call.id(), defName, call.arguments(), key, journal.dir()));
+            }
+            // Declared idempotent: safe to re-execute.
+        }
+        return executeToolCall(call, registry, t.recordedResults());
+    }
+
     private String executeToolCall(ToolCallRequest call, ToolRegistry registry,
                                    Map<String, String> replayedResults) {
+        String idemKey = idempotencyKey(call);
         emit(new AgentEvent.ToolCallStarted(Instant.now(), call));
         long start = System.currentTimeMillis();
         String result;
-        String replayed = replayedResults.get(call.id());
+        String replayed = replayedResults.get(idemKey);
         if (replayed != null) {
-            // Idempotent replay: this call completed before the crash — reuse the
+            // Exactly-once: this call completed before the crash — reuse the
             // recorded observation instead of executing the tool again.
             result = replayed;
         } else {
@@ -422,10 +493,10 @@ public final class ReActAgent {
                         Instant.now(), call.name(), call.arguments()));
                     boolean approved = config.approvalHandler().approve(def.get(), call.arguments());
                     result = approved
-                        ? invokeWithTimeout(registry, def.get(), call)
+                        ? invokeWithLedger(registry, def.get(), call, idemKey)
                         : "DENIED: the human operator rejected this tool call. Adjust your plan to proceed without it.";
                 } else {
-                    result = invokeWithTimeout(registry, def.get(), call);
+                    result = invokeWithLedger(registry, def.get(), call, idemKey);
                 }
             } catch (ToolInvocationException e) {
                 // Feed the error back so the model can self-correct.
@@ -436,6 +507,34 @@ public final class ReActAgent {
         }
         emit(new AgentEvent.ToolCallFinished(
             Instant.now(), call, result, System.currentTimeMillis() - start));
+        return result;
+    }
+
+    /**
+     * Invoke a tool with the side-effect ledger wrapped around the tool body:
+     * the {@code tool_call_started} record is journaled immediately before
+     * the body runs (after any approval), and {@code tool_call_completed}
+     * right after it returns — including when the tool fails, since the error
+     * observation is its completion. Anything that escapes without a
+     * completion record (approval-handler death, JVM crash) leaves the crash
+     * window: a started key with no completion.
+     */
+    private String invokeWithLedger(ToolRegistry registry, ToolDefinition def,
+                                    ToolCallRequest call, String idemKey) {
+        if (journal != null) {
+            journal.appendToolCallStarted(idemKey, call);
+        }
+        String result;
+        try {
+            result = invokeWithTimeout(registry, def, call);
+        } catch (ToolInvocationException e) {
+            // The tool ran and failed: the error observation is its
+            // completion, so resume replays it instead of re-executing.
+            result = "ERROR: " + e.getMessage();
+        }
+        if (journal != null) {
+            journal.appendToolCallCompleted(idemKey, result);
+        }
         return result;
     }
 

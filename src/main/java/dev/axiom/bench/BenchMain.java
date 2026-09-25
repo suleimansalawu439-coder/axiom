@@ -4,6 +4,10 @@ import dev.axiom.Axiom;
 import dev.axiom.agent.AgentConfig;
 import dev.axiom.agent.ApprovalHandler;
 import dev.axiom.budget.ModelPrices;
+import dev.axiom.llm.LlmClient;
+import dev.axiom.llm.OpenAiCompatibleClient;
+import dev.axiom.resilience.RetryPolicy;
+import dev.axiom.resilience.RetryingLlmClient;
 import dev.axiom.tools.SubprocessTool;
 import dev.axiom.tools.Tool;
 import dev.axiom.tools.ToolParam;
@@ -11,6 +15,7 @@ import dev.axiom.tools.ToolParam;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
@@ -22,16 +27,28 @@ import java.util.function.BiFunction;
  *
  * <pre>
  * # Offline / deterministic (default): scripted model fixtures, real tool execution
- * java -cp "target/axiom-0.3.0.jar:lib/*" dev.axiom.bench.BenchMain
+ * java -cp "target/axiom-0.5.0.jar:lib/*" dev.axiom.bench.BenchMain
  *
- * # Live: real model via OPENAI_API_KEY (or any OpenAI-compatible endpoint)
- * AXIOM_BENCH_MODEL=gpt-4o-mini OPENAI_API_KEY=sk-... \
- *   java -cp "target/axiom-0.3.0.jar:lib/*" dev.axiom.bench.BenchMain --live
+ * # Live on a free tier: Gemini (free, no card), OpenRouter (:free models),
+ * # Groq (free tier), or a local Ollama server — $0 end to end
+ * export GEMINI_API_KEY=...   # from https://aistudio.google.com/apikey
+ * AXIOM_BENCH_PROVIDER=gemini \
+ *   java -cp "target/axiom-0.5.0.jar:lib/*" dev.axiom.bench.BenchMain --live
+ *
+ * # Any other OpenAI-compatible endpoint / paid key:
+ * AXIOM_BENCH_PROVIDER=openai AXIOM_BENCH_MODEL=gpt-4o-mini OPENAI_API_KEY=sk-... \
+ *   java -cp "target/axiom-0.5.0.jar:lib/*" dev.axiom.bench.BenchMain --live
  * </pre>
  *
- * Writes a machine-readable receipt to
+ * <p>Keys come from environment variables only — never paste a key into chat
+ * or commit one to a file. The provider list and key sources are documented in
+ * {@link BenchProvider}.
+ *
+ * <p>Writes a machine-readable receipt to
  * {@code benchmarks/receipts/receipt-<mode>-<timestamp>.json} and prints a
- * human-readable summary.
+ * human-readable summary. Live receipts carry a honesty disclosure (subset
+ * scope, provider tier, pacing, cost basis) — a 4-task representative subset
+ * is never presented as a full GAIA/SWE-bench score.
  */
 public final class BenchMain {
 
@@ -59,14 +76,44 @@ public final class BenchMain {
 
     public static void main(String[] args) {
         boolean live = List.of(args).contains("--live");
-        String model = System.getenv().getOrDefault("AXIOM_BENCH_MODEL", "gpt-4o-mini");
-        String mode = live ? "live" : "fixture";
+        String providerId = System.getenv().getOrDefault("AXIOM_BENCH_PROVIDER", "openai");
+        BenchProvider.Preset preset = live
+            ? BenchProvider.of(providerId)
+            : null;
+        String model = live
+            ? System.getenv().getOrDefault("AXIOM_BENCH_MODEL", preset.defaultModel())
+            : "fixture";
+        String mode = live ? "live-" + preset.id() : "fixture";
+
+        LlmClient liveClient = null;
+        String apiKey = null;
+        if (live) {
+            if (preset.needsKey()) {
+                apiKey = System.getenv(preset.apiKeyEnv());
+                if (apiKey == null || apiKey.isBlank()) {
+                    System.err.println("""
+                        Missing API key: %s is not set.
+                        Get a key at %s, then:
+                          export %s=...   (never paste it into chat or commit it)
+                        Or use the keyless local option: AXIOM_BENCH_PROVIDER=ollama"""
+                        .formatted(preset.apiKeyEnv(), preset.keySignup(), preset.apiKeyEnv()));
+                    System.exit(2);
+                }
+            }
+            liveClient = new RetryingLlmClient(
+                new OpenAiCompatibleClient(preset.baseUrl(), apiKey == null ? "" : apiKey, model),
+                RetryPolicy.builder()
+                    .maxAttempts(6)
+                    .initialBackoff(Duration.ofSeconds(2))
+                    .build());
+        }
+        LlmClient client = liveClient;
 
         BiFunction<BenchTask, Path, BenchAgent> factory = (task, workdir) -> {
             AgentConfig.Builder b = Axiom.agent()
                 .withApprovalHandler(ApprovalHandler.allowAll());
             if (live) {
-                b.withModel(model);
+                b.withClient(client);
             } else {
                 b.withClient(FixtureLlm.loadResource("/bench/fixtures/" + task.id() + ".json"));
             }
@@ -81,9 +128,16 @@ public final class BenchMain {
             return new Axiom.Agent(b.build())::run;
         };
 
-        String receiptModel = live ? model : "fixture";
+        long pacingMs = live ? Long.parseLong(System.getenv()
+            .getOrDefault("AXIOM_BENCH_DELAY_MS", String.valueOf(preset.defaultPacingMs()))) : 0;
+        String notes = live
+            ? ("Representative 4-task subset (3 GAIA-style + 1 SWE-bench-style), not the full "
+                + "GAIA/SWE-bench suites. Provider: " + preset.id() + " (" + preset.keySignup() + "). "
+                + "Rate-limited with " + pacingMs + "ms pacing between tasks; HTTP 429 retried "
+                + "with Retry-After honored. Cost basis: provider free tier ($0).")
+            : "Deterministic fixture run: scripted model responses, real tool execution. No provider cost.";
         BenchReceipt receipt = BenchRunner.run(tasks(), factory,
-            ModelPrices.defaults(), receiptModel, mode);
+            ModelPrices.defaults(), model, mode, pacingMs, notes);
 
         String stamp = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss")
             .withZone(ZoneOffset.UTC).format(Instant.now());
@@ -100,13 +154,13 @@ public final class BenchMain {
     // ------------------------------------------------------------------
 
     static class CalcTools {
-        @Tool(description = "Multiply two numbers")
+        @Tool(name = "bench_multiply", description = "Multiply two numbers")
         public int multiply(@ToolParam(description = "x") int x,
                             @ToolParam(description = "y") int y) {
             return x * y;
         }
 
-        @Tool(description = "Add two numbers")
+        @Tool(name = "bench_add", description = "Add two numbers")
         public int add(@ToolParam(description = "x") int x,
                        @ToolParam(description = "y") int y) {
             return x + y;
@@ -120,7 +174,7 @@ public final class BenchMain {
             this.root = root;
         }
 
-        @Tool(description = "Read a text file from the workspace")
+        @Tool(name = "bench_read_file", description = "Read a text file from the workspace")
         public String readFile(@ToolParam(description = "File name, e.g. data.txt") String name)
                 throws Exception {
             Path p = root.resolve(name).normalize();

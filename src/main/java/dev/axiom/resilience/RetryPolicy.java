@@ -82,12 +82,26 @@ public final class RetryPolicy {
 
     /**
      * Default predicate: retry {@link dev.axiom.llm.LlmException}s except
-     * client errors (HTTP 4xx — retrying those never helps). Everything else
-     * (network failures wrapped by the client) is retried.
+     * client errors. HTTP 429 (rate limited) <b>is</b> retried — backing off
+     * is exactly what the provider asks for — as is any 5xx except 501
+     * (Not Implemented never heals by retrying). All other 4xx are not
+     * retried. Network failures wrapped by the client are retried.
      */
     static boolean defaultRetryable(Exception e) {
-        String msg = e.getMessage();
-        if (msg != null && msg.matches("(?s).*HTTP 4\\d\\d.*")) return false;
-        return e instanceof dev.axiom.llm.LlmException;
+        if (e instanceof dev.axiom.llm.LlmException le) {
+            int status = le.statusCode();
+            if (status != dev.axiom.llm.LlmException.NO_STATUS) {
+                return status == 429 || (status >= 500 && status != 501);
+            }
+            // No status code: fall back to message sniffing for exceptions
+            // built before status plumbing existed.
+            String msg = le.getMessage();
+            if (msg != null) {
+                if (msg.matches("(?s).*HTTP 429.*")) return true;
+                if (msg.matches("(?s).*HTTP 4\\d\\d.*")) return false;
+            }
+            return true;
+        }
+        return false;
     }
 }

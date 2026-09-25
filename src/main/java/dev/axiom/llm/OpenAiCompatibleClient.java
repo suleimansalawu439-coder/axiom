@@ -10,6 +10,9 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.time.Instant;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.*;
 
 /**
@@ -61,7 +64,8 @@ public final class OpenAiCompatibleClient implements StreamingLlmClient {
             HttpResponse<String> resp = http.send(req.build(), HttpResponse.BodyHandlers.ofString());
             if (resp.statusCode() != 200) {
                 throw new LlmException(
-                    "LLM request failed with HTTP %d: %s".formatted(resp.statusCode(), truncate(resp.body(), 500)));
+                    "LLM request failed with HTTP %d: %s".formatted(resp.statusCode(), truncate(resp.body(), 500)),
+                    resp.statusCode(), retryAfterSeconds(resp));
             }
             return parseResponse(resp.body());
         } catch (LlmException e) {
@@ -209,7 +213,8 @@ public final class OpenAiCompatibleClient implements StreamingLlmClient {
                     err = new String(in.readAllBytes(), StandardCharsets.UTF_8);
                 }
                 throw new LlmException(
-                    "LLM streaming request failed with HTTP %d: %s".formatted(resp.statusCode(), truncate(err, 500)));
+                    "LLM streaming request failed with HTTP %d: %s".formatted(resp.statusCode(), truncate(err, 500)),
+                    resp.statusCode(), retryAfterSeconds(resp));
             }
             return parseSseStream(resp.body(), listener);
         } catch (LlmException e) {
@@ -285,5 +290,38 @@ public final class OpenAiCompatibleClient implements StreamingLlmClient {
 
     private static String truncate(String s, int max) {
         return s != null && s.length() > max ? s.substring(0, max) + "…" : s;
+    }
+
+    /** Upper bound for a honored Retry-After delay: ten minutes. */
+    private static final long MAX_RETRY_AFTER_SECONDS = 600;
+
+    private static long retryAfterSeconds(HttpResponse<?> resp) {
+        return resp.headers().firstValue("Retry-After")
+            .map(OpenAiCompatibleClient::parseRetryAfterSeconds)
+            .orElse((long) LlmException.NO_STATUS);
+    }
+
+    /**
+     * Parse a {@code Retry-After} header value: either delay-seconds or an
+     * HTTP-date. Returns the delay in seconds clamped to
+     * [0, {@value #MAX_RETRY_AFTER_SECONDS}], or {@link LlmException#NO_STATUS}
+     * when the value is missing or unparseable.
+     */
+    public static long parseRetryAfterSeconds(String value) {
+        if (value == null || value.isBlank()) return LlmException.NO_STATUS;
+        String v = value.trim();
+        try {
+            long secs = Long.parseLong(v);
+            return Math.max(0, Math.min(secs, MAX_RETRY_AFTER_SECONDS));
+        } catch (NumberFormatException ignored) {
+            // fall through to HTTP-date parsing
+        }
+        try {
+            long secs = ZonedDateTime.parse(v, DateTimeFormatter.RFC_1123_DATE_TIME)
+                .toInstant().getEpochSecond() - Instant.now().getEpochSecond();
+            return Math.max(0, Math.min(secs, MAX_RETRY_AFTER_SECONDS));
+        } catch (Exception ignored) {
+            return LlmException.NO_STATUS;
+        }
     }
 }

@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 
@@ -118,8 +119,7 @@ class CacheTest {
     }
 
     @Test
-    void toolCallsRoundTripThroughCache() {
-        var counting = new CountingLlm() {
+    void toolCallsRoundTripThroughCache() {        var counting = new CountingLlm() {
             @Override
             public ChatResponse chat(List<ChatMessage> m, List<ToolDefinition> t, LlmOptions o) {
                 calls++;
@@ -139,5 +139,125 @@ class CacheTest {
         assertEquals(1, r2.toolCalls().size());
         assertEquals("search", r2.toolCalls().get(0).name());
         assertEquals("x", r2.toolCalls().get(0).arguments().get("q"));
+    }
+
+    // ---------- CachingLlmClient.chatStream ----------
+
+    static class StreamingCountingLlm implements StreamingLlmClient {
+        int calls;
+
+        @Override
+        public ChatResponse chatStream(List<ChatMessage> m, List<ToolDefinition> t,
+                                       LlmOptions o, TokenListener l) {
+            calls++;
+            l.onToken("hel");
+            l.onToken("lo");
+            return new ChatResponse("hello", List.of(),
+                new ChatResponse.TokenUsage(5, 5, 10));
+        }
+
+        @Override
+        public ChatResponse chat(List<ChatMessage> m, List<ToolDefinition> t, LlmOptions o) {
+            throw new UnsupportedOperationException("streaming fake");
+        }
+
+        @Override
+        public String model() { return "stream-counter"; }
+    }
+
+    @Test
+    void streamingMissBuffersTokensAndHitReplaysThem() {
+        var streaming = new StreamingCountingLlm();
+        var client = new CachingLlmClient(streaming, new InMemoryCache());
+        var opts = LlmClient.LlmOptions.defaults();
+
+        var seenMiss = new ArrayList<String>();
+        ChatResponse r1 = client.chatStream(msgs("hi"), List.of(), opts, seenMiss::add);
+        assertEquals(1, streaming.calls);
+        assertEquals(List.of("hel", "lo"), seenMiss);
+        assertEquals("hello", r1.content());
+
+        var seenHit = new ArrayList<String>();
+        ChatResponse r2 = client.chatStream(msgs("hi"), List.of(), opts, seenHit::add);
+        assertEquals(1, streaming.calls, "hit must not call the delegate");
+        assertEquals(List.of("hel", "lo"), seenHit, "hit must replay stored token chunks");
+        assertEquals(r1.content(), r2.content());
+        assertEquals(r1.usage().totalTokens(), r2.usage().totalTokens());
+    }
+
+    @Test
+    void streamingTreatsLegacyEntryWithoutChunksAsMiss() {
+        var streaming = new StreamingCountingLlm();
+        var cache = new InMemoryCache();
+        var client = new CachingLlmClient(streaming, cache);
+        var opts = LlmClient.LlmOptions.defaults();
+
+        // Entry in the pre-chunk format: no "tokens" property.
+        String key = CacheKeys.forChat("stream-counter", msgs("hi"), List.of(), opts);
+        cache.put(key,
+            "{\"content\":\"stale\",\"toolCalls\":[]," +
+            "\"promptTokens\":1,\"completionTokens\":1,\"totalTokens\":2}");
+
+        var seen = new ArrayList<String>();
+        ChatResponse r = client.chatStream(msgs("hi"), List.of(), opts, seen::add);
+
+        assertEquals(1, streaming.calls, "legacy entry must be treated as a miss");
+        assertEquals(List.of("hel", "lo"), seen);
+        assertEquals("hello", r.content());
+
+        // The entry was rewritten with chunks: the next call is a real hit.
+        var seenAgain = new ArrayList<String>();
+        client.chatStream(msgs("hi"), List.of(), opts, seenAgain::add);
+        assertEquals(1, streaming.calls);
+        assertEquals(List.of("hel", "lo"), seenAgain);
+    }
+
+    @Test
+    void streamingTreatsCorruptEntryAsMiss() {
+        var streaming = new StreamingCountingLlm();
+        var cache = new InMemoryCache();
+        var client = new CachingLlmClient(streaming, cache);
+        var opts = LlmClient.LlmOptions.defaults();
+
+        cache.put(CacheKeys.forChat("stream-counter", msgs("hi"), List.of(), opts),
+            "this is not json {{{");
+
+        var seen = new ArrayList<String>();
+        ChatResponse r = client.chatStream(msgs("hi"), List.of(), opts, seen::add);
+
+        assertEquals(1, streaming.calls);
+        assertEquals("hello", r.content());
+        assertEquals(List.of("hel", "lo"), seen);
+    }
+
+    @Test
+    void chatTreatsCorruptEntryAsMiss() {
+        var counting = new CountingLlm();
+        var cache = new InMemoryCache();
+        var client = new CachingLlmClient(counting, cache);
+        var opts = LlmClient.LlmOptions.defaults();
+
+        cache.put(CacheKeys.forChat("counter", msgs("hi"), List.of(), opts), "nope{{{");
+
+        ChatResponse r = client.chat(msgs("hi"), List.of(), opts);
+        assertEquals(1, counting.calls);
+        assertEquals("answer-1", r.content());
+    }
+
+    @Test
+    void streamingWithNonStreamingDelegateCachesSingleToken() {
+        var counting = new CountingLlm();
+        var client = new CachingLlmClient(counting, new InMemoryCache());
+        var opts = LlmClient.LlmOptions.defaults();
+
+        var seenMiss = new ArrayList<String>();
+        client.chatStream(msgs("yo"), List.of(), opts, seenMiss::add);
+        assertEquals(1, counting.calls);
+        assertEquals(List.of("answer-1"), seenMiss);
+
+        var seenHit = new ArrayList<String>();
+        client.chatStream(msgs("yo"), List.of(), opts, seenHit::add);
+        assertEquals(1, counting.calls);
+        assertEquals(List.of("answer-1"), seenHit);
     }
 }

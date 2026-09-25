@@ -7,14 +7,28 @@ import dev.axiom.llm.LlmException;
 import dev.axiom.llm.StreamingLlmClient;
 import dev.axiom.tools.ToolDefinition;
 
+import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 
 /**
  * An {@link LlmClient} decorator that retries transient failures according
- * to a {@link RetryPolicy}. Streaming retries from scratch (partial tokens
- * are discarded) — listeners therefore only see the successful attempt's
- * tokens.
+ * to a {@link RetryPolicy}.
+ *
+ * <p>Streaming retries from scratch: each attempt's tokens are buffered and
+ * forwarded to the listener only when that attempt succeeds, so the listener
+ * sees exactly one complete token sequence — partial tokens from failed
+ * attempts are discarded, never replayed. A failed attempt therefore costs
+ * the caller nothing observable: no tokens, no partial response.
+ *
+ * <p>If the delegate is not a {@link StreamingLlmClient}, its
+ * {@link #chat} is retried under the same policy and the successful
+ * response's content is delivered to the listener as a single token.
+ *
+ * <p>When a failed attempt carries the provider's {@code Retry-After} hint
+ * (see {@link LlmException#retryAfterSeconds()}), the wait before the next
+ * attempt is the longer of the policy backoff and the hinted delay.
  *
  * <pre>{@code
  * var client = new RetryingLlmClient(
@@ -60,27 +74,56 @@ public final class RetryingLlmClient implements StreamingLlmClient {
                 if (!policy.shouldRetry(e, attempt)) {
                     throw e instanceof RuntimeException re ? re : new LlmException(e.getMessage(), e);
                 }
-                sleepBeforeRetry(attempt);
+                sleepBeforeRetry(e, attempt);
             }
         }
     }
 
-    private void sleepBeforeRetry(int attempt) {
+    @Override
+    public ChatResponse chatStream(List<ChatMessage> messages, List<ToolDefinition> tools,
+                                   LlmOptions options, TokenListener listener) {
+        int attempt = 0;
+        while (true) {
+            attempt++;
+            List<String> buffered = new ArrayList<>();
+            try {
+                ChatResponse response;
+                if (delegate instanceof StreamingLlmClient s) {
+                    // Buffer this attempt's tokens; only replay them on success.
+                    response = s.chatStream(messages, tools, options, buffered::add);
+                    for (String token : buffered) {
+                        listener.onToken(token);
+                    }
+                } else {
+                    response = delegate.chat(messages, tools, options);
+                    if (response.content() != null && !response.content().isEmpty()) {
+                        listener.onToken(response.content());
+                    }
+                }
+                return response;
+            } catch (Exception e) {
+                // buffered tokens are dropped here — the next attempt starts clean.
+                if (!policy.shouldRetry(e, attempt)) {
+                    throw e instanceof RuntimeException re ? re : new LlmException(e.getMessage(), e);
+                }
+                sleepBeforeRetry(e, attempt);
+            }
+        }
+    }
+
+    private void sleepBeforeRetry(Exception failure, int attempt) {
+        Duration wait = policy.backoffForAttempt(attempt + 1);
+        if (failure instanceof LlmException le && le.retryAfterSeconds() >= 0) {
+            Duration hinted = Duration.ofSeconds(le.retryAfterSeconds());
+            if (hinted.compareTo(wait) > 0) {
+                wait = hinted;
+            }
+        }
         try {
-            sleeper.sleep(policy.backoffForAttempt(attempt + 1).toMillis());
+            sleeper.sleep(wait.toMillis());
         } catch (InterruptedException ie) {
             Thread.currentThread().interrupt();
             throw new LlmException("Retry interrupted", ie);
         }
-    }
-
-    /** Streaming is delegated without retry (a partial stream can't resume). */
-    @Override
-    public ChatResponse chatStream(List<ChatMessage> messages, List<ToolDefinition> tools,
-                                   LlmOptions options, TokenListener listener) {
-        if (delegate instanceof StreamingLlmClient s) {
-            return s.chatStream(messages, tools, options, listener);
-        }
-        return chat(messages, tools, options);
     }
 }

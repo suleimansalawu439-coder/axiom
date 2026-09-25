@@ -24,14 +24,25 @@ public final class ToolRegistry {
 
     /** Register all {@code @Tool} methods on the given instance. */
     public ToolRegistry register(Object toolHolder) {
+        // Single source of truth: prefer the schemas the annotation processor
+        // generated at compile time (META-INF/axiom/tools/<binary-name>.json).
+        // Reflection is only a fallback for holders compiled without the
+        // processor (e.g. ad-hoc scripts); SchemaDriftTest guards the
+        // fallback against diverging from the compile-time mapping.
+        Map<String, Map<String, Object>> generated =
+            loadGeneratedSchemas(toolHolder.getClass());
         for (Method method : toolHolder.getClass().getMethods()) {
             Tool ann = method.getAnnotation(Tool.class);
             if (ann == null) continue;
             String name = ann.name().isBlank() ? method.getName() : ann.name();
+            Map<String, Object> schema = generated.get(name);
+            if (schema == null) {
+                schema = buildSchema(method);
+            }
             register(ToolDefinition.forMethod(
-                name, ann.description(), buildSchema(method),
+                name, ann.description(), schema,
                 ann.requiresApproval(), ann.timeoutSeconds(),
-                reflectiveInvoker(toolHolder, method, name), method));
+                reflectiveInvoker(toolHolder, method, name), method, ann.idempotent()));
             toolHolderClasses.put(name, toolHolder.getClass().getName());
         }
         return this;
@@ -115,8 +126,43 @@ public final class ToolRegistry {
     }
 
     // ------------------------------------------------------------------
-    // JSON Schema generation (mirrored at compile time by ToolProcessor)
+    // JSON Schema generation (reflective fallback)
     // ------------------------------------------------------------------
+
+    /**
+     * Load the compile-time schema artifact for a tool holder, if the
+     * annotation processor generated one. Returns tool name -&gt; parameters
+     * schema; empty when the holder was compiled without the processor (or
+     * the artifact is unreadable), in which case registration falls back to
+     * {@link #buildSchema(Method)}.
+     */
+    @SuppressWarnings("unchecked")
+    private Map<String, Map<String, Object>> loadGeneratedSchemas(Class<?> holderClass) {
+        String resource = "/META-INF/axiom/tools/"
+            + holderClass.getName().replace('.', '/') + ".json";
+        try (var in = holderClass.getResourceAsStream(resource)) {
+            if (in == null) return Map.of();
+            Map<String, Object> root = mapper.readValue(in, Map.class);
+            // Guard against a stale artifact from a different class that
+            // happened to share a resource path.
+            if (!holderClass.getName().equals(root.get("class"))) return Map.of();
+            Object tools = root.get("tools");
+            if (!(tools instanceof List<?> list)) return Map.of();
+            Map<String, Map<String, Object>> out = new LinkedHashMap<>();
+            for (Object t : list) {
+                if (t instanceof Map<?, ?> m) {
+                    Object n = m.get("name");
+                    Object p = m.get("parameters");
+                    if (n instanceof String s && p instanceof Map<?, ?> pm) {
+                        out.put(s, (Map<String, Object>) pm);
+                    }
+                }
+            }
+            return out;
+        } catch (Exception e) {
+            return Map.of(); // corrupt artifact: fall back, never fail registration
+        }
+    }
 
     private Map<String, Object> buildSchema(Method method) {
         Map<String, Object> properties = new LinkedHashMap<>();
@@ -139,12 +185,22 @@ public final class ToolRegistry {
         return schema;
     }
 
+    /**
+     * Reflective fallback schema builder. Must produce exactly what the
+     * annotation processor generates at compile time — {@code SchemaDriftTest}
+     * enforces this over a matrix of types. Any {@code Collection} is an
+     * array (not just {@code List}); {@code short}/{@code byte}/
+     * {@code BigDecimal} map like their wider siblings.
+     */
     static String jsonType(Class<?> c) {
         if (c == String.class || c == char.class || c == Character.class) return "string";
         if (c == boolean.class || c == Boolean.class) return "boolean";
-        if (c == int.class || c == Integer.class || c == long.class || c == Long.class) return "integer";
-        if (c == double.class || c == Double.class || c == float.class || c == Float.class) return "number";
-        if (List.class.isAssignableFrom(c) || c.isArray()) return "array";
+        if (c == byte.class || c == Byte.class || c == short.class || c == Short.class
+                || c == int.class || c == Integer.class
+                || c == long.class || c == Long.class) return "integer";
+        if (c == float.class || c == Float.class || c == double.class || c == Double.class
+                || c == java.math.BigDecimal.class) return "number";
+        if (java.util.Collection.class.isAssignableFrom(c) || c.isArray()) return "array";
         return "object";
     }
 }

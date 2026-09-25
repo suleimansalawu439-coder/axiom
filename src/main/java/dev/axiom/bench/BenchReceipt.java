@@ -32,15 +32,24 @@ public final class BenchReceipt {
     private final String mode;
     private final Instant timestamp;
     private final List<TaskResult> results;
+    /** Honesty disclosure: subset scope, provider tier, cost basis, limits. */
+    private final String notes;
 
     public BenchReceipt(String framework, String frameworkVersion, String model,
                         String mode, Instant timestamp, List<TaskResult> results) {
+        this(framework, frameworkVersion, model, mode, timestamp, results, "");
+    }
+
+    public BenchReceipt(String framework, String frameworkVersion, String model,
+                        String mode, Instant timestamp, List<TaskResult> results,
+                        String notes) {
         this.framework = framework;
         this.frameworkVersion = frameworkVersion;
         this.model = model;
         this.mode = mode;
         this.timestamp = timestamp;
         this.results = List.copyOf(results);
+        this.notes = notes == null ? "" : notes;
     }
 
     public String framework() { return framework; }
@@ -48,6 +57,8 @@ public final class BenchReceipt {
     public String model() { return model; }
     public String mode() { return mode; }
     public Instant timestamp() { return timestamp; }
+    /** Honesty disclosure recorded with the receipt (may be blank). */
+    public String notes() { return notes; }
     public List<TaskResult> results() { return results; }
 
     public int passed() { return (int) results.stream().filter(TaskResult::passed).count(); }
@@ -83,6 +94,7 @@ public final class BenchReceipt {
         m.put("model", model);
         m.put("mode", mode);
         m.put("timestamp", timestamp.toString());
+        if (!notes.isBlank()) m.put("notes", notes);
         List<Map<String, Object>> rs = new ArrayList<>();
         for (TaskResult r : results) {
             Map<String, Object> rm = new LinkedHashMap<>();
@@ -124,6 +136,7 @@ public final class BenchReceipt {
         sb.append("Totals: %d/%d passed (%.0f%%), %d tokens, $%.4f, %dms".formatted(
             passed(), results.size(), passRate() * 100, totalTokens(), totalCostUsd(),
             totalLatencyMs()));
+        if (!notes.isBlank()) sb.append("%nNotes: %s".formatted(notes));
         return sb.toString();
     }
 }

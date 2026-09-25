@@ -1,6 +1,7 @@
 package dev.axiom.agent;
 
 import dev.axiom.budget.Budget;
+import dev.axiom.guardrails.Guardrail;
 import dev.axiom.llm.LlmClient;
 import dev.axiom.memory.Memory;
 import dev.axiom.tools.ToolDefinition;
@@ -21,6 +22,7 @@ public final class AgentConfig {
     private final Memory memory;
     private final Budget budget;
     private final java.nio.file.Path journalRoot;
+    private final List<Guardrail> guardrails;
     private final List<Consumer<AgentEvent>> eventListeners;
 
     private AgentConfig(Builder b) {
@@ -33,6 +35,7 @@ public final class AgentConfig {
         this.memory = b.memory;
         this.budget = b.budget;
         this.journalRoot = b.journalRoot;
+        this.guardrails = List.copyOf(b.guardrails);
         this.eventListeners = List.copyOf(b.eventListeners);
     }
 
@@ -52,6 +55,11 @@ public final class AgentConfig {
      * via {@link dev.axiom.durable.AgentRun#resumeFrom}.
      */
     public java.nio.file.Path journalRoot() { return journalRoot; }
+    /**
+     * Policy checks applied to the task (before the run) and the final
+     * answer (before it is returned). Empty when none are configured.
+     */
+    public List<Guardrail> guardrails() { return guardrails; }
     public List<Consumer<AgentEvent>> eventListeners() { return eventListeners; }
 
     void emit(AgentEvent event) {
@@ -79,6 +87,7 @@ public final class AgentConfig {
         private Memory memory;
         private Budget budget;
         private java.nio.file.Path journalRoot;
+        private final List<Guardrail> guardrails = new ArrayList<>();
         private final List<Consumer<AgentEvent>> eventListeners = new ArrayList<>();
 
         public Builder withClient(LlmClient client) { this.client = client; return this; }
@@ -114,6 +123,17 @@ public final class AgentConfig {
          * completed tool calls are replayed from the journal, never re-executed.
          */
         public Builder withJournalRoot(java.nio.file.Path root) { this.journalRoot = root; return this; }
+        /**
+         * Policy checks on the task (before the run) and the final answer
+         * (before it is returned). A {@link Verdict.Block} aborts the run
+         * with {@link GuardrailViolationException} after emitting
+         * {@link AgentEvent.GuardrailBlocked}; a {@link Verdict.Replace}
+         * substitutes the sanitized text and continues.
+         */
+        public Builder withGuardrails(Guardrail... guardrails) {
+            this.guardrails.addAll(List.of(guardrails));
+            return this;
+        }
         public Builder onEvent(Consumer<AgentEvent> listener) {
             this.eventListeners.add(listener);
             return this;

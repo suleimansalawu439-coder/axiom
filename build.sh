@@ -65,8 +65,12 @@ java -jar lib/junit-platform-console-standalone-1.10.3.jar execute \
   --select-class dev.axiom.durable.DurableRunTest \
   --select-class dev.axiom.eval.EvalHarnessTest \
   --select-class dev.axiom.a2a.A2aTest \
-  --select-class dev.axiom.bench.BenchRunnerTest 2>&1 | tail -12
+  --select-class dev.axiom.bench.BenchRunnerTest \
+  --select-class dev.axiom.resilience.ResilienceTest \
+  --select-class dev.axiom.cache.CacheTest \
+  --select-class dev.axiom.guardrails.GuardrailTest \
+  --select-class dev.axiom.observe.ObserveTest 2>&1 | tail -12
 
-echo "==> Packaging axiom-0.3.0.jar..."
-jar --create --file target/axiom-0.3.0.jar -C target/classes .
-echo "Done: target/axiom-0.3.0.jar"
+echo "==> Packaging axiom-0.4.0.jar..."
+jar --create --file target/axiom-0.4.0.jar -C target/classes .
+echo "Done: target/axiom-0.4.0.jar"

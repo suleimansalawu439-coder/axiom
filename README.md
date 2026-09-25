@@ -13,6 +13,10 @@ Every mainstream agent framework defines tools as runtime dictionaries: misspell
 - **Tool timeouts** — per-tool `timeoutSeconds`; hanging tools are cancelled and reported, never wedging the run.
 - **Conversation memory** — pluggable `Memory` (bundled `SlidingWindowMemory`) gives multi-turn conversations without manual message management.
 - **Full-fidelity events** — every LLM call, tool call, approval, budget charge, and result emits a typed `AgentEvent`. Tracing, UIs, and logging plug in with one listener.
+- **Resilience** — `RetryingLlmClient` with exponential backoff + jitter for transient provider failures (client errors are never retried).
+- **Response caching** — `CachingLlmClient` serves identical requests from a content-hash key: deterministic runs, free replays, offline CI.
+- **Guardrails** — policy checks on inputs and outputs: block, or redact and continue (`KeywordBlocklistGuardrail`, `PiiRedactionGuardrail` bundled).
+- **Observability exporters** — `JsonLinesExporter` (one JSON line per event, `jq`-queryable) and `MetricsReporter` (live counters for dashboards).
 - **Provider-agnostic** — any OpenAI-compatible endpoint: OpenAI, Azure, Ollama, vLLM, LM Studio, Together…
 
 ## v0.2 — what's new
@@ -133,6 +137,56 @@ try {
 
 Every LLM call is charged; breaching a limit throws `BudgetExceededException` (carrying the full snapshot). `BudgetUpdated` events fire after every call — even the breaching one — so UIs can render live cost meters. Budgets are thread-safe and shareable across a supervisor team.
 
+## v0.4 — what's new
+
+### Resilience (`dev.axiom.resilience`)
+
+Transient provider failures (rate limits, 5xx, network blips) shouldn't kill a run. `RetryingLlmClient` wraps any client with exponential backoff + jitter; client errors (HTTP 4xx) are never retried:
+
+```java
+var client = new RetryingLlmClient(
+    new OpenAiCompatibleClient("gpt-4o"),
+    RetryPolicy.builder().maxAttempts(5).initialBackoff(Duration.ofSeconds(1)).build());
+```
+
+### Response caching (`dev.axiom.cache`)
+
+Identical requests (same model, messages, tools, options) hit a content-hash key instead of the provider. Deterministic runs, free replays, offline CI:
+
+```java
+var client = new CachingLlmClient(
+    new OpenAiCompatibleClient("gpt-4o-mini"),
+    new FileCache(Path.of(".axiom-cache")));  // or InMemoryCache for tests
+```
+
+### Guardrails (`dev.axiom.guardrails`)
+
+Policy checks on the task (before the run) and the final answer (before it's returned). A block aborts with `GuardrailViolationException` after emitting `AgentEvent.GuardrailBlocked`; a replace substitutes sanitized text and continues:
+
+```java
+.withGuardrails(
+    new KeywordBlocklistGuardrail(List.of("malware", "exploit")),
+    new PiiRedactionGuardrail())  // redacts emails, card/SSN-like numbers
+```
+
+Implement `Guardrail` to plug in a real DLP engine or content classifier.
+
+### Observability exporters (`dev.axiom.observe`)
+
+`JsonLinesExporter` appends every event as one JSON line — ship it to Loki, Elasticsearch, or Datadog, or query it directly:
+
+```java
+.onEvent(new JsonLinesExporter(Path.of("logs", "axiom-events.jsonl")).asListener())
+```
+
+```bash
+jq -c 'select(.type=="ToolCallFinished")' logs/axiom-events.jsonl
+```
+
+`MetricsReporter` keeps live in-memory counters (runs, LLM calls, tokens, tool calls/errors/latency, approvals, guardrail blocks, budget breaches) with `snapshot()` for dashboards and `summary()` for logs.
+
+See `examples/` for three runnable starters: `ResearchAgent` (retries + budget + guardrails + metrics), `CachedAgent` (disk-cached runs), `ObservedAgent` (JSONL export + metrics).
+
 ## v0.3 — what's new
 
 ### Durable execution (`dev.axiom.durable`)
@@ -243,12 +297,12 @@ GAIA-style and SWE-bench-style runners that record machine-readable receipts —
 
 ```bash
 # Offline / deterministic (default): scripted model fixtures, REAL tool execution
-java -cp "target/axiom-0.3.0.jar:lib/*" dev.axiom.bench.BenchMain
+java -cp "target/axiom-0.4.0.jar:lib/*" dev.axiom.bench.BenchMain
 # -> benchmarks/receipts/receipt-fixture-<timestamp>.json
 
 # Live: against a real model
 AXIOM_BENCH_MODEL=gpt-4o-mini OPENAI_API_KEY=sk-... \
-  java -cp "target/axiom-0.3.0.jar:lib/*" dev.axiom.bench.BenchMain --live
+  java -cp "target/axiom-0.4.0.jar:lib/*" dev.axiom.bench.BenchMain --live
 ```
 
 ```
@@ -296,7 +350,7 @@ If `webSearch`'s signature and its schema ever disagree, the build fails. That's
 No Maven required (a `pom.xml` is included for standard environments):
 
 ```bash
-./build.sh   # compiles, runs all tests, packages target/axiom-0.3.0.jar
+./build.sh   # compiles, runs all tests, packages target/axiom-0.4.0.jar
 ```
 
 Requirements: JDK 21 (auto-detected at `~/workspace/tools/jdk-21`).
@@ -305,13 +359,13 @@ Requirements: JDK 21 (auto-detected at `~/workspace/tools/jdk-21`).
 
 ```bash
 export OPENAI_API_KEY=sk-...
-java -cp "target/axiom-0.3.0.jar:lib/*" dev.axiom.demo.DemoAgent "What is 17*23, and save the answer as a note?"
+java -cp "target/axiom-0.4.0.jar:lib/*" dev.axiom.demo.DemoAgent "What is 17*23, and save the answer as a note?"
 ```
 
 ## Roadmap
 
-- **v0.4**: durable idempotency keys for tool side effects, A2A authentication/push notifications, eval dataset versioning, hosted benchmark leaderboard
+- **v0.5**: durable idempotency keys for tool side effects, A2A authentication/push notifications, eval dataset versioning, hosted benchmark leaderboard
 
 ## Status
 
-v0.3.0 — durable execution with crash recovery, typed eval harness, native A2A v1.0, streaming tokens, reproducible benchmark receipts. 96 tests green.
+v0.4.0 — LLM retry with backoff, response caching, guardrails, observability exporters, runnable examples. 129 tests green.

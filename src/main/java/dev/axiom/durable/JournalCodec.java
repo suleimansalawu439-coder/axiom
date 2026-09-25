@@ -77,6 +77,11 @@ final class JournalCodec {
         } else if (event instanceof AgentEvent.RunFinished e) {
             m.put("type", "RunFinished");
             m.put("result", resultToMap(e.result()));
+        } else if (event instanceof AgentEvent.GuardrailBlocked e) {
+            m.put("type", "GuardrailBlocked");
+            m.put("guardrailName", e.guardrailName());
+            m.put("side", e.side());
+            m.put("reason", e.reason());
         } else {
             m.put("type", "Unknown");
         }
@@ -106,6 +111,8 @@ final class JournalCodec {
                 snapshotFromMap((Map<String, Object>) m.get("snapshot")));
             case "RunFinished" -> new AgentEvent.RunFinished(timestamp,
                 resultFromMap((Map<String, Object>) m.get("result")));
+            case "GuardrailBlocked" -> new AgentEvent.GuardrailBlocked(timestamp,
+                str(m.get("guardrailName")), str(m.get("side")), str(m.get("reason")));
             default -> new AgentEvent.RunStarted(timestamp, "");
         };
     }

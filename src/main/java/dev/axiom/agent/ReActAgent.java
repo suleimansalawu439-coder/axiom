@@ -5,6 +5,9 @@ import dev.axiom.budget.Budget;
 import dev.axiom.budget.BudgetExceededException;
 import dev.axiom.durable.DurableException;
 import dev.axiom.durable.RunJournal;
+import dev.axiom.guardrails.Guardrail;
+import dev.axiom.guardrails.GuardrailViolationException;
+import dev.axiom.guardrails.Verdict;
 import dev.axiom.llm.*;
 import dev.axiom.output.OutputSchema;
 import dev.axiom.output.StructuredOutputException;
@@ -131,18 +134,19 @@ public final class ReActAgent {
                              Map<String, String> replayedResults) {}
 
     private RunWithTranscript runWithTranscript(String task) {
+        String screened = applyInputGuardrails(task);
         if (config.journalRoot() != null) {
             journal = RunJournal.create(config.journalRoot());
-            journal.appendRunStarted(task, configSnapshot());
+            journal.appendRunStarted(screened, configSnapshot());
         }
-        emit(new AgentEvent.RunStarted(Instant.now(), task));
+        emit(new AgentEvent.RunStarted(Instant.now(), screened));
 
         List<ChatMessage> messages = new ArrayList<>();
         messages.add(ChatMessage.system(config.systemPrompt()));
         if (config.memory() != null) {
             messages.addAll(config.memory().history());
         }
-        messages.add(ChatMessage.user(task));
+        messages.add(ChatMessage.user(screened));
 
         LoopState state = new LoopState(messages, 0,
             ChatResponse.TokenUsage.empty(), 0, Map.of());
@@ -259,10 +263,11 @@ public final class ReActAgent {
             chargeBudget(response.usage());
 
             if (!response.hasToolCalls()) {
+                String answer = applyOutputGuardrails(response.content());
                 AgentResult result = new AgentResult(
-                    response.content(), iteration, state.toolCallsMade(), totalUsage, true);
+                    answer, iteration, state.toolCallsMade(), totalUsage, true);
                 emit(new AgentEvent.RunFinished(Instant.now(), result));
-                state.messages().add(ChatMessage.assistant(response.content()));
+                state.messages().add(ChatMessage.assistant(answer));
                 return result;
             }
 
@@ -283,11 +288,49 @@ public final class ReActAgent {
             options, config.maxIterations() + 1);
         ChatResponse.TokenUsage totalUsage = state.totalUsage().add(closing.usage());
         chargeBudget(closing.usage());
+        String answer = applyOutputGuardrails(closing.content());
         AgentResult result = new AgentResult(
-            closing.content(), config.maxIterations(), state.toolCallsMade(), totalUsage, false);
+            answer, config.maxIterations(), state.toolCallsMade(), totalUsage, false);
         emit(new AgentEvent.RunFinished(Instant.now(), result));
-        state.messages().add(ChatMessage.assistant(closing.content()));
+        state.messages().add(ChatMessage.assistant(answer));
         return result;
+    }
+
+    /**
+     * Run the task through every configured input guardrail. Blocks abort
+     * with {@link GuardrailViolationException} (after a
+     * {@link AgentEvent.GuardrailBlocked} event); replaces substitute the
+     * sanitized task and continue.
+     */
+    private String applyInputGuardrails(String task) {
+        String current = task;
+        for (Guardrail g : config.guardrails()) {
+            Verdict v = g.checkInput(current);
+            if (v instanceof Verdict.Block b) {
+                emit(new AgentEvent.GuardrailBlocked(
+                    Instant.now(), g.name(), "input", b.reason()));
+                throw new GuardrailViolationException(g.name(), b.reason());
+            } else if (v instanceof Verdict.Replace r) {
+                current = r.text();
+            }
+        }
+        return current;
+    }
+
+    /** Same contract as {@link #applyInputGuardrails}, for the final answer. */
+    private String applyOutputGuardrails(String answer) {
+        String current = answer == null ? "" : answer;
+        for (Guardrail g : config.guardrails()) {
+            Verdict v = g.checkOutput(current);
+            if (v instanceof Verdict.Block b) {
+                emit(new AgentEvent.GuardrailBlocked(
+                    Instant.now(), g.name(), "output", b.reason()));
+                throw new GuardrailViolationException(g.name(), b.reason());
+            } else if (v instanceof Verdict.Replace r) {
+                current = r.text();
+            }
+        }
+        return current;
     }
 
     /**

@@ -16,7 +16,8 @@ public sealed interface AgentEvent permits
         AgentEvent.RunStarted, AgentEvent.LlmRequest, AgentEvent.LlmResponse,
         AgentEvent.StreamToken,
         AgentEvent.ToolCallStarted, AgentEvent.ToolCallFinished,
-        AgentEvent.ApprovalRequested, AgentEvent.BudgetUpdated, AgentEvent.RunFinished {
+        AgentEvent.ApprovalRequested, AgentEvent.BudgetUpdated,
+        AgentEvent.GuardrailBlocked, AgentEvent.RunFinished {
 
     Instant timestamp();
 
@@ -42,5 +43,12 @@ public sealed interface AgentEvent permits
      */
     record BudgetUpdated(Instant timestamp, ChatResponse.TokenUsage charged,
                          Budget.Snapshot snapshot) implements AgentEvent {}
+    /**
+     * Emitted when a guardrail blocks the task or the final answer. The run
+     * aborts with {@link dev.axiom.guardrails.GuardrailViolationException}
+     * right after this event. {@code side} is "input" or "output".
+     */
+    record GuardrailBlocked(Instant timestamp, String guardrailName,
+                            String side, String reason) implements AgentEvent {}
     record RunFinished(Instant timestamp, AgentResult result) implements AgentEvent {}
 }

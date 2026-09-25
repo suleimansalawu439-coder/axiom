@@ -60,7 +60,7 @@ class BenchRunnerTest {
         assertEquals(0, receipt.failed());
         assertEquals("fixture", receipt.mode());
         assertEquals("axiom", receipt.framework());
-        assertEquals("0.3.0", receipt.frameworkVersion());
+        assertEquals("0.4.0", receipt.frameworkVersion());
         // Tokens and latency were recorded for every task.
         assertTrue(receipt.results().stream().allMatch(r -> r.latencyMs() >= 0));
     }
@@ -112,7 +112,7 @@ class BenchRunnerTest {
 
         Map<String, Object> m = JSON.readValue(p.toFile(), Map.class);
         assertEquals("axiom", m.get("framework"));
-        assertEquals("0.3.0", m.get("frameworkVersion"));
+        assertEquals("0.4.0", m.get("frameworkVersion"));
         assertEquals("fixture", m.get("mode"));
         assertEquals(1, ((Map<String, Object>) m.get("totals")).get("passed"));
         List<Map<String, Object>> results = (List<Map<String, Object>>) m.get("results");

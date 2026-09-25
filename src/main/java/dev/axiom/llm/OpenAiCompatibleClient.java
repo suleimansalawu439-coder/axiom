@@ -122,12 +122,25 @@ public final class OpenAiCompatibleClient implements StreamingLlmClient {
                 List<Map<String, Object>> wireCalls = new ArrayList<>();
                 for (ToolCallRequest tc : m.toolCalls()) {
                     try {
-                        wireCalls.add(Map.of(
-                            "id", tc.id(),
-                            "type", "function",
-                            "function", Map.of(
-                                "name", tc.name(),
-                                "arguments", mapper.writeValueAsString(tc.arguments()))));
+                        Map<String, Object> wireCall = new LinkedHashMap<>();
+                        wireCall.put("id", tc.id());
+                        wireCall.put("type", "function");
+                        wireCall.put("function", Map.of(
+                            "name", tc.name(),
+                            "arguments", mapper.writeValueAsString(tc.arguments())));
+                        if (tc.thoughtSignature() != null && !tc.thoughtSignature().isBlank()) {
+                            // Gemini 3 ("thinking") models require the opaque thought
+                            // signature echoed back with the call it arrived on, else the
+                            // follow-up request fails with HTTP 400. Emit both known
+                            // shapes — Google's extra_content envelope and the top-level
+                            // sibling some proxies use; upstreams ignore the one they
+                            // don't recognize. Never synthesized: only replayed when a
+                            // signature was actually captured on this call.
+                            wireCall.put("extra_content", Map.of("google", Map.of(
+                                "thought_signature", tc.thoughtSignature())));
+                            wireCall.put("thoughtSignature", tc.thoughtSignature());
+                        }
+                        wireCalls.add(wireCall);
                     } catch (Exception e) {
                         throw new LlmException("Failed to serialize tool call: " + e.getMessage(), e);
                     }
@@ -157,7 +170,8 @@ public final class OpenAiCompatibleClient implements StreamingLlmClient {
                     ? Map.of()
                     : mapper.readValue(argsJson, new TypeReference<>() {});
                 toolCalls.add(new ToolCallRequest(
-                    (String) tc.get("id"), (String) fn.get("name"), args));
+                    (String) tc.get("id"), (String) fn.get("name"), args,
+                    readThoughtSignature(tc)));
             }
         }
 
@@ -235,7 +249,30 @@ public final class OpenAiCompatibleClient implements StreamingLlmClient {
     private static final class ToolCallDelta {
         String id;
         String name;
+        String thoughtSignature;
         final StringBuilder arguments = new StringBuilder();
+    }
+
+    /**
+     * Read a thought signature off a tool-call object or delta, if the
+     * provider attached one. Reads either known shape: Google's
+     * OpenAI-compatible envelope ({@code extra_content.google.thought_signature})
+     * or a top-level {@code thoughtSignature}/{@code thought_signature} sibling
+     * that some proxies emit. Returns {@code null} when absent.
+     */
+    @SuppressWarnings("unchecked")
+    static String readThoughtSignature(Map<String, Object> toolCall) {
+        Object extra = toolCall.get("extra_content");
+        if (extra instanceof Map<?, ?> em) {
+            Object google = ((Map<String, Object>) em).get("google");
+            if (google instanceof Map<?, ?> gm) {
+                Object sig = ((Map<String, Object>) gm).get("thought_signature");
+                if (sig instanceof String s && !s.isBlank()) return s;
+            }
+        }
+        Object top = toolCall.get("thoughtSignature");
+        if (top == null) top = toolCall.get("thought_signature");
+        return top instanceof String s && !s.isBlank() ? s : null;
     }
 
     /** Parse an SSE stream into the assembled response (pure function — unit-testable). */
@@ -274,6 +311,8 @@ public final class OpenAiCompatibleClient implements StreamingLlmClient {
                         int index = d.get("index") instanceof Number n ? n.intValue() : 0;
                         ToolCallDelta acc = deltas.computeIfAbsent(index, k -> new ToolCallDelta());
                         if (d.get("id") instanceof String id) acc.id = id;
+                        String sig = readThoughtSignature(d);
+                        if (sig != null) acc.thoughtSignature = sig;
                         Object fn = d.get("function");
                         if (fn instanceof Map<?, ?> fmRaw) {
                             Map<String, Object> fm = (Map<String, Object>) fmRaw;
@@ -290,7 +329,7 @@ public final class OpenAiCompatibleClient implements StreamingLlmClient {
             Map<String, Object> args = (argsJson == null || argsJson.isBlank())
                 ? Map.of()
                 : mapper.readValue(argsJson, new TypeReference<>() {});
-            toolCalls.add(new ToolCallRequest(d.id, d.name, args));
+            toolCalls.add(new ToolCallRequest(d.id, d.name, args, d.thoughtSignature));
         }
         return new ChatResponse(content.toString(), toolCalls, usage);
     }

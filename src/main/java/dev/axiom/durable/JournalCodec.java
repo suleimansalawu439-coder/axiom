@@ -145,6 +145,9 @@ final class JournalCodec {
         m.put("id", c.id());
         m.put("name", c.name());
         m.put("arguments", c.arguments() == null ? Map.of() : c.arguments());
+        // Thought signature (Gemini 3): must round-trip so a resumed run can
+        // replay the call verbatim. Absent in old journals -> null, fine.
+        if (c.thoughtSignature() != null) m.put("thoughtSignature", c.thoughtSignature());
         return m;
     }
 
@@ -152,7 +155,8 @@ final class JournalCodec {
     static ToolCallRequest callFromMap(Map<String, Object> m) {
         Object args = m.get("arguments");
         return new ToolCallRequest(str(m.get("id")), str(m.get("name")),
-            args instanceof Map<?, ?> am ? (Map<String, Object>) am : Map.of());
+            args instanceof Map<?, ?> am ? (Map<String, Object>) am : Map.of(),
+            strOrNull(m.get("thoughtSignature")));
     }
 
     static Map<String, Object> usageToMap(ChatResponse.TokenUsage u) {

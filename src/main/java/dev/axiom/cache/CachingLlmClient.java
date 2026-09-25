@@ -113,7 +113,8 @@ public final class CachingLlmClient implements StreamingLlmClient {
             return mapper.writeValueAsString(new StoredResponse(
                 r.content(),
                 r.toolCalls().stream()
-                    .map(tc -> new StoredToolCall(tc.id(), tc.name(), tc.arguments()))
+                    .map(tc -> new StoredToolCall(tc.id(), tc.name(), tc.arguments(),
+                        tc.thoughtSignature()))
                     .toList(),
                 r.usage().promptTokens(), r.usage().completionTokens(),
                 r.usage().totalTokens(),
@@ -135,7 +136,8 @@ public final class CachingLlmClient implements StreamingLlmClient {
         return new ChatResponse(
             s.content(),
             s.toolCalls().stream()
-                .map(tc -> new ToolCallRequest(tc.id(), tc.name(), tc.arguments()))
+                .map(tc -> new ToolCallRequest(tc.id(), tc.name(), tc.arguments(),
+                    tc.thoughtSignature()))
                 .toList(),
             new ChatResponse.TokenUsage(
                 s.promptTokens(), s.completionTokens(), s.totalTokens()));
@@ -150,5 +152,6 @@ public final class CachingLlmClient implements StreamingLlmClient {
                                   long promptTokens, long completionTokens,
                                   long totalTokens, List<String> tokens) {}
     private record StoredToolCall(String id, String name,
-                                  java.util.Map<String, Object> arguments) {}
+                                  java.util.Map<String, Object> arguments,
+                                  String thoughtSignature) {}
 }

@@ -1,0 +1,110 @@
+{
+  "framework" : "axiom",
+  "frameworkVersion" : "0.5.4",
+  "model" : "gemini-3.8-flash",
+  "mode" : "live-gemini",
+  "timestamp" : "2026-09-25T05:01:34.067385100Z",
+  "notes" : "Representative 4-task subset (3 GAIA-style + 1 SWE-bench-style), not the full GAIA/SWE-bench suites. Provider: gemini (https://aistudio.google.com/apikey — free tier, no card required). Rate-limited with 4000ms pacing between tasks; HTTP 429 retried with Retry-After honored. Cost basis: provider free tier ($0).",
+  "results" : [ {
+    "taskId" : "gaia-arithmetic",
+    "kind" : "gaia",
+    "passed" : true,
+    "output" : "396",
+    "promptTokens" : 769,
+    "completionTokens" : 43,
+    "totalTokens" : 812,
+    "costUsd" : 0.0,
+    "latencyMs" : 26831,
+    "detail" : "output contained expected text",
+    "prompt" : "What is 17 * 23 + 5? Reply with just the number.",
+    "expected" : "396",
+    "trace" : [ {
+      "iteration" : 1,
+      "modelText" : "",
+      "toolCalls" : [ {
+        "name" : "bench_multiply",
+        "arguments" : {
+          "y" : 23,
+          "x" : 17
+        },
+        "result" : "391",
+        "durationMs" : 52
+      } ]
+    }, {
+      "iteration" : 2,
+      "modelText" : "",
+      "toolCalls" : [ {
+        "name" : "bench_add",
+        "arguments" : {
+          "y" : 5,
+          "x" : 391
+        },
+        "result" : "396",
+        "durationMs" : 2
+      } ]
+    }, {
+      "iteration" : 3,
+      "modelText" : "396",
+      "toolCalls" : [ ]
+    } ],
+    "testOutput" : null,
+    "error" : null
+  }, {
+    "taskId" : "gaia-two-step",
+    "kind" : "gaia",
+    "passed" : false,
+    "output" : null,
+    "promptTokens" : 0,
+    "completionTokens" : 0,
+    "totalTokens" : 0,
+    "costUsd" : 0.0,
+    "latencyMs" : 147478,
+    "detail" : "harness error: dev.axiom.llm.LlmException: LLM streaming request failed with HTTP 429: [{\n  \"error\": {\n    \"code\": 429,\n    \"message\": \"You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \\n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 20, model: gemini-3.8-flash\\nP…",
+    "prompt" : "What is 6 * 7? Then add 8 to your result. Reply with just the final number.",
+    "expected" : "50",
+    "trace" : [ ],
+    "testOutput" : null,
+    "error" : "dev.axiom.llm.LlmException: LLM streaming request failed with HTTP 429: [{\n  \"error\": {\n    \"code\": 429,\n    \"message\": \"You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \\n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 20, model: gemini-3.8-flash\\nPlease retry in 39.549806969s.\",\n    \"status\": \"RESOURCE_EXHAUSTED\",\n    …\r\n\tat dev.axiom.llm.OpenAiCompatibleClient.chatStream(OpenAiCompatibleClient.java:238)\r\n\tat dev.axiom.resilience.RetryingLlmClient.chatStream(RetryingLlmClient.java:93)\r\n\tat dev.axiom.agent.ReActAgent.doChat(ReActAgent.java:369)\r\n\tat dev.axiom.agent.ReActAgent.runLoop(ReActAgent.java:284)\r\n\tat dev.axiom.agent.ReActAgent.runWithTranscript(ReActAgent.java:162)\r\n\tat dev.axiom.agent.ReActAgent.run(ReActAgent.java:101)\r\n\tat dev.axiom.Axiom$Agent.run(Axiom.java:37)\r\n\tat dev.axiom.bench.BenchMain$1.run(BenchMain.java:139)\r\n\tat dev.axiom.bench.BenchRunner.runOne(BenchRunner.java:84)\r\n\tat dev.axiom.bench.BenchRunner.run(BenchRunner.java:65)\r\n\tat dev.axiom.bench.BenchMain.main(BenchMain.java:157)\r\n"
+  }, {
+    "taskId" : "gaia-file-lookup",
+    "kind" : "gaia",
+    "passed" : false,
+    "output" : null,
+    "promptTokens" : 0,
+    "completionTokens" : 0,
+    "totalTokens" : 0,
+    "costUsd" : 0.0,
+    "latencyMs" : 184692,
+    "detail" : "harness error: dev.axiom.llm.LlmException: LLM streaming request failed with HTTP 429: [{\n  \"error\": {\n    \"code\": 429,\n    \"message\": \"You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \\n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 20, model: gemini-3.8-flash\\nP…",
+    "prompt" : "Read the file 'data.txt' in the workspace and tell me which city is named as the capital. Reply with just the city name.",
+    "expected" : "Abuja",
+    "trace" : [ ],
+    "testOutput" : null,
+    "error" : "dev.axiom.llm.LlmException: LLM streaming request failed with HTTP 429: [{\n  \"error\": {\n    \"code\": 429,\n    \"message\": \"You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \\n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 20, model: gemini-3.8-flash\\nPlease retry in 30.88339154s.\",\n    \"status\": \"RESOURCE_EXHAUSTED\",\n    \"…\r\n\tat dev.axiom.llm.OpenAiCompatibleClient.chatStream(OpenAiCompatibleClient.java:238)\r\n\tat dev.axiom.resilience.RetryingLlmClient.chatStream(RetryingLlmClient.java:93)\r\n\tat dev.axiom.agent.ReActAgent.doChat(ReActAgent.java:369)\r\n\tat dev.axiom.agent.ReActAgent.runLoop(ReActAgent.java:284)\r\n\tat dev.axiom.agent.ReActAgent.runWithTranscript(ReActAgent.java:162)\r\n\tat dev.axiom.agent.ReActAgent.run(ReActAgent.java:101)\r\n\tat dev.axiom.Axiom$Agent.run(Axiom.java:37)\r\n\tat dev.axiom.bench.BenchMain$1.run(BenchMain.java:139)\r\n\tat dev.axiom.bench.BenchRunner.runOne(BenchRunner.java:84)\r\n\tat dev.axiom.bench.BenchRunner.run(BenchRunner.java:65)\r\n\tat dev.axiom.bench.BenchMain.main(BenchMain.java:157)\r\n"
+  }, {
+    "taskId" : "swe-fix-greeting",
+    "kind" : "swe",
+    "passed" : false,
+    "output" : null,
+    "promptTokens" : 0,
+    "completionTokens" : 0,
+    "totalTokens" : 0,
+    "costUsd" : 0.0,
+    "latencyMs" : 122033,
+    "detail" : "harness error: dev.axiom.llm.LlmException: LLM streaming request failed with HTTP 429: [{\n  \"error\": {\n    \"code\": 429,\n    \"message\": \"You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \\n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 20, model: gemini-3.8-flash\\nP…",
+    "prompt" : "The file greet.txt must contain exactly 'Hello, world!'. Use the run tool to fix it, then reply Done.",
+    "expected" : null,
+    "trace" : [ ],
+    "testOutput" : null,
+    "error" : "dev.axiom.llm.LlmException: LLM streaming request failed with HTTP 429: [{\n  \"error\": {\n    \"code\": 429,\n    \"message\": \"You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \\n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 20, model: gemini-3.8-flash\\nPlease retry in 25.046530095s.\",\n    \"status\": \"RESOURCE_EXHAUSTED\",\n    …\r\n\tat dev.axiom.llm.OpenAiCompatibleClient.chatStream(OpenAiCompatibleClient.java:238)\r\n\tat dev.axiom.resilience.RetryingLlmClient.chatStream(RetryingLlmClient.java:93)\r\n\tat dev.axiom.agent.ReActAgent.doChat(ReActAgent.java:369)\r\n\tat dev.axiom.agent.ReActAgent.runLoop(ReActAgent.java:284)\r\n\tat dev.axiom.agent.ReActAgent.runWithTranscript(ReActAgent.java:162)\r\n\tat dev.axiom.agent.ReActAgent.run(ReActAgent.java:101)\r\n\tat dev.axiom.Axiom$Agent.run(Axiom.java:37)\r\n\tat dev.axiom.bench.BenchMain$1.run(BenchMain.java:139)\r\n\tat dev.axiom.bench.BenchRunner.runOne(BenchRunner.java:84)\r\n\tat dev.axiom.bench.BenchRunner.run(BenchRunner.java:65)\r\n\tat dev.axiom.bench.BenchMain.main(BenchMain.java:157)\r\n"
+  } ],
+  "totals" : {
+    "tasks" : 4,
+    "passed" : 1,
+    "failed" : 3,
+    "passRate" : 0.25,
+    "totalTokens" : 812,
+    "totalCostUsd" : 0.0,
+    "totalLatencyMs" : 481034
+  }
+}

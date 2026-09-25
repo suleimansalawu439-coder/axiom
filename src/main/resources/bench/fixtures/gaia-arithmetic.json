@@ -1,0 +1,1 @@
+[{"content":"I'll multiply 17 by 23, then add 5.","tool_calls":[{"arguments":{"x":17,"y":23},"id":"c1","name":"multiply"}],"usage":{"completion_tokens":12,"prompt_tokens":60,"total_tokens":72}},{"content":"396","tool_calls":[],"usage":{"completion_tokens":3,"prompt_tokens":75,"total_tokens":78}}]

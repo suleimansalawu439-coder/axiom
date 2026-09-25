@@ -1,0 +1,61 @@
+{
+  "framework" : "axiom",
+  "frameworkVersion" : "0.3.0",
+  "model" : "fixture",
+  "mode" : "fixture",
+  "timestamp" : "2026-09-25T01:07:08.324311718Z",
+  "results" : [ {
+    "taskId" : "gaia-arithmetic",
+    "kind" : "gaia",
+    "passed" : true,
+    "output" : "396",
+    "promptTokens" : 135,
+    "completionTokens" : 15,
+    "totalTokens" : 150,
+    "costUsd" : 0.0,
+    "latencyMs" : 2882,
+    "detail" : "output contained expected text"
+  }, {
+    "taskId" : "gaia-two-step",
+    "kind" : "gaia",
+    "passed" : true,
+    "output" : "50",
+    "promptTokens" : 212,
+    "completionTokens" : 29,
+    "totalTokens" : 241,
+    "costUsd" : 0.0,
+    "latencyMs" : 27,
+    "detail" : "output contained expected text"
+  }, {
+    "taskId" : "gaia-file-lookup",
+    "kind" : "gaia",
+    "passed" : true,
+    "output" : "Abuja",
+    "promptTokens" : 155,
+    "completionTokens" : 17,
+    "totalTokens" : 172,
+    "costUsd" : 0.0,
+    "latencyMs" : 338,
+    "detail" : "output contained expected text"
+  }, {
+    "taskId" : "swe-fix-greeting",
+    "kind" : "swe",
+    "passed" : true,
+    "output" : "Done",
+    "promptTokens" : 175,
+    "completionTokens" : 24,
+    "totalTokens" : 199,
+    "costUsd" : 0.0,
+    "latencyMs" : 242,
+    "detail" : "testCommand <sh test.sh> exited 0"
+  } ],
+  "totals" : {
+    "tasks" : 4,
+    "passed" : 4,
+    "failed" : 0,
+    "passRate" : 1.0,
+    "totalTokens" : 762,
+    "totalCostUsd" : 0.0,
+    "totalLatencyMs" : 3489
+  }
+}

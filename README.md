@@ -29,9 +29,9 @@ try (McpClient mcp = McpClient.spawn(List.of("npx", "-y", "@modelcontextprotocol
     McpTools.registerAll(registry, mcp);          // every server tool becomes a ToolDefinition…
     registry.register(McpTools.resourceReaderTool(mcp)); // …plus resources/read as a tool
 
-    var agent = Axiom.agent().withModel("gpt-4o")
+    var agent = new Axiom.Agent(Axiom.agent().withModel("gpt-4o")
         .withToolDefinitions(registry.all().toArray(ToolDefinition[]::new))
-        .buildAgent();
+        .build());
     agent.run("Summarize the README in /data");
 }   // try-with-resources closes the server process
 ```
@@ -82,7 +82,7 @@ EmbeddingFunction embeddings = new OpenAiEmbeddings("text-embedding-3-small");
 // …or your own: text -> myModel.embed(text)
 
 Memory memory = new VectorMemory(embeddings, Path.of("memory/vectors.json"));
-var agent = Axiom.agent().withModel("gpt-4o").withMemory(memory).buildAgent();
+var agent = new Axiom.Agent(Axiom.agent().withModel("gpt-4o").withMemory(memory).build());
 
 agent.run("My dog's name is Biscuit");  // stored + embedded
 agent.run("What's my dog's name?");    // recall surfaces "Biscuit" as context
@@ -101,7 +101,7 @@ var shell = SubprocessTool.builder(Path.of("/tmp/agent-workspace"))
     .timeout(Duration.ofSeconds(30))
     .build();
 
-var agent = Axiom.agent().withModel("gpt-4o").withTools(shell).buildAgent();
+var agent = new Axiom.Agent(Axiom.agent().withModel("gpt-4o").withTools(shell).build());
 ```
 
 Guarantees: **no shell** (argv goes straight to `execve`, metacharacters are inert), **working-directory confinement** (executable paths can't escape the root), **environment allowlist** (secrets never leak into the child), **bounded stdout/stderr capture**, **timeout kill**, and `requiresApproval = true` by default on the `run` tool.
@@ -117,12 +117,12 @@ Budget budget = Budget.builder()
     .prices(ModelPrices.defaults())   // per-model $/1k tokens; override with withPrice(...)
     .build();
 
-var agent = Axiom.agent().withModel("gpt-4o")
+var agent = new Axiom.Agent(Axiom.agent().withModel("gpt-4o")
     .withBudget(budget)
     .onEvent(e -> { if (e instanceof AgentEvent.BudgetUpdated u)
         System.out.printf("spent $%.4f of $%.2f%n",
             u.snapshot().costUsd(), u.snapshot().maxCostUsd()); })
-    .buildAgent();
+    .build());
 
 try {
     agent.run("Research everything about quantum batteries");
@@ -132,6 +132,135 @@ try {
 ```
 
 Every LLM call is charged; breaching a limit throws `BudgetExceededException` (carrying the full snapshot). `BudgetUpdated` events fire after every call — even the breaching one — so UIs can render live cost meters. Budgets are thread-safe and shareable across a supervisor team.
+
+## v0.3 — what's new
+
+### Durable execution (`dev.axiom.durable`)
+
+Long-running agents that survive process death. Every run appends to a JSONL journal (fsync'd checkpoints), and a crashed run resumes from its journal — completed tool calls replay their **recorded results** instead of re-executing:
+
+```java
+Path journalRoot = Path.of("runs");
+var config = AgentConfig.builder()
+    .withModel("gpt-4o")
+    .withTools(new Tools())
+    .withJournalRoot(journalRoot)
+    .build();
+
+AgentRun run = AgentRun.begin(config, "Research solid-state batteries");
+// ... the process can die at any point here ...
+String checkpointId = run.checkpoint();   // fsync'd; the stable resume handle
+AgentResult result = run.result();
+
+// After a crash, in a new process:
+AgentRun resumed = AgentRun.resumeFrom(journalRoot, checkpointId, config);
+AgentResult result = resumed.result();
+```
+
+Semantics, stated plainly:
+
+- **Completed tool calls are exactly-once from Axiom's perspective** — their results were journaled, so resume replays them and never calls the tool again.
+- **In-flight calls are at-least-once** — a call requested but not finished before the crash is re-executed on resume. If the tool has external side effects, make it idempotent (a future API will propagate stable idempotency keys).
+- **Token streams are ephemeral** — `StreamToken` events are delivered live but never journaled; the journal only records complete turns, so resume never acts on a half-received response.
+
+`AgentRun.listRuns(root)` lists crashed-but-resumable runs. Config-less recovery rebuilds the agent from the journal's recorded model and no-arg tool holders; synthetic tools (MCP/A2A/team) need their `AgentConfig` rebuilt explicitly.
+
+### Typed eval harness (`dev.axiom.eval`)
+
+Prompt regression testing where the compiler ties each case's scorer to its output type — a scorer for the wrong type doesn't compile:
+
+```java
+record Summary(String title, List<String> points) {}
+
+EvalSuite suite = EvalSuite.of("summaries",
+    EvalCase.of("q3-points", "Summarize the Q3 report", Summary.class,
+        (s, ctx) -> s.points().size() == 2
+            ? ScoreResult.pass("two points")
+            : ScoreResult.fail("expected 2 points, got " + s.points().size())),
+    EvalCase.of("cheerful", "Answer cheerfully", String.class,
+        Scorers.llmJudge(new OpenAiLlmJudge(client), 0.7)));
+
+var agent = new Axiom.Agent(Axiom.agent().withModel("gpt-4o").withTools(new Tools()).build());
+EvalReport report = EvalRunner.run(suite, EvalRunner.AgentFactory.of(agent), "gpt-4o");
+report.save(Path.of("evals/report.json"));
+
+// Catch regressions against a baseline:
+EvalDiff diff = EvalReport.load(Path.of("evals/baseline.json")).diff(report);
+if (diff.hasRegressions()) System.out.println(diff);   // pass_to_fail, score_drop > 0.05
+```
+
+Built-in scorers: `exactMatch`, `exactMatchIgnoreCase`, `containsAll`, `parsesAs` (schema-conformance backstop), `llmJudge`. Every case records pass/fail, score, explanation, prompt/completion tokens, cost, latency, and error detail. Reports persist as JSON.
+
+### Native A2A v1.0 (`dev.axiom.a2a`)
+
+Agent-to-agent interop over plain HTTP + JSON — JDK only, no framework. Serve any Axiom agent to foreign A2A agents, or consume them:
+
+```java
+// Expose an agent:
+var researcher = new Axiom.Agent(
+    Axiom.agent().withModel("gpt-4o").withTools(new WebTools()).build());
+AgentCard card = AgentCard.simple("researcher", "Researches topics",
+    "http://localhost:8080", "research a topic and return a brief");
+try (A2aServer server = A2aServer.serve(researcher, card, 8080)) {
+    // …visible to any A2A client, Axiom or foreign…
+}
+
+// Consume any A2A agent (Axiom or foreign — cards are parsed tolerantly):
+A2aClient client = new A2aClient();
+AgentCard card = client.getAgentCard("http://localhost:8080");
+A2aTask task = client.sendTask("http://localhost:8080", "Summarize solid-state batteries");
+System.out.println(task.artifactText().orElse("(none)"));
+// …or subscribe: client.streamTask(url, text) → status/artifact SSE updates
+
+// Or delegate from inside another Axiom agent — a remote agent as a local tool:
+var agent = new Axiom.Agent(Axiom.agent().withModel("gpt-4o")
+    .withToolDefinitions(A2aClient.asTool("http://localhost:8080",
+        "remote_researcher", "Delegates research to the remote agent"))
+    .build());
+```
+
+Implemented methods: `message/send`, `message/stream` (SSE status + artifact updates), `tasks/get`, `tasks/cancel`, plus `GET /.well-known/agent-card.json`. Authentication, TLS termination, and push notifications are intentionally out of scope for 0.3.
+
+### Streaming model tokens (`dev.axiom.llm`)
+
+`OpenAiCompatibleClient` implements `StreamingLlmClient`: tokens are delivered to the listener as they arrive, while the agent still acts only on the **complete** assembled turn (fragmented `tool_calls` deltas are merged before the agent sees them):
+
+```java
+var agent = new ReActAgent(AgentConfig.builder()
+    .withClient(new OpenAiCompatibleClient("https://api.openai.com/v1", apiKey, "gpt-4o-mini"))
+    .withTools(new Tools())
+    .onEvent(e -> { if (e instanceof AgentEvent.StreamToken t) System.out.print(t.token()); })
+    .build());
+
+agent.run("Tell me a story");   // tokens print live; non-streaming clients are unaffected
+```
+
+Works against any OpenAI-compatible endpoint (OpenAI, Azure, Ollama, vLLM…); usage is read from `stream_options.include_usage` chunks when the provider sends them.
+
+### Reproducible benchmark receipts (`dev.axiom.bench`)
+
+GAIA-style and SWE-bench-style runners that record machine-readable receipts — framework, version, model, per-task pass/fail, tokens, cost, latency:
+
+```bash
+# Offline / deterministic (default): scripted model fixtures, REAL tool execution
+java -cp "target/axiom-0.3.0.jar:lib/*" dev.axiom.bench.BenchMain
+# -> benchmarks/receipts/receipt-fixture-<timestamp>.json
+
+# Live: against a real model
+AXIOM_BENCH_MODEL=gpt-4o-mini OPENAI_API_KEY=sk-... \
+  java -cp "target/axiom-0.3.0.jar:lib/*" dev.axiom.bench.BenchMain --live
+```
+
+```
+Benchmark receipt: axiom 0.3.0 | model=fixture mode=fixture
+  [PASS] gaia-arithmetic      gaia (150 tokens, $0.0000, 2882ms)
+  [PASS] gaia-two-step        gaia (241 tokens, $0.0000, 27ms)
+  [PASS] gaia-file-lookup     gaia (172 tokens, $0.0000, 338ms)
+  [PASS] swe-fix-greeting     swe (199 tokens, $0.0000, 242ms)
+Totals: 4/4 passed (100%), 762 tokens, $0.0000, 3489ms
+```
+
+GAIA-style tasks pass when the agent's output contains the expected text; SWE-style tasks give the agent a sandboxed shell on a scratch copy of a repo and pass when the test command exits 0. Fixture mode scripts only the *model's* turns — tools really execute — so fixtures are deterministic without being vacuous. These are style/subset runners for reproducible self-measurement, not official GAIA/SWE-bench scores.
 
 ## Quickstart
 
@@ -145,13 +274,13 @@ public class Tools {
     }
 }
 
-var agent = Axiom.agent()
+var agent = new Axiom.Agent(Axiom.agent()
     .withModel("gpt-4o")                       // or withClient(new OpenAiCompatibleClient(url, key, model))
     .withTools(new Tools())
     .withSystemPrompt("You are a research assistant.")
     .withMemory(new SlidingWindowMemory(40))
     .onEvent(e -> System.out.println(e))       // tracing
-    .buildAgent();
+    .build());
 
 String answer = agent.run("What happened in AI this week?");
 
@@ -167,7 +296,7 @@ If `webSearch`'s signature and its schema ever disagree, the build fails. That's
 No Maven required (a `pom.xml` is included for standard environments):
 
 ```bash
-./build.sh   # compiles, runs all tests, packages target/axiom-0.2.0.jar
+./build.sh   # compiles, runs all tests, packages target/axiom-0.3.0.jar
 ```
 
 Requirements: JDK 21 (auto-detected at `~/workspace/tools/jdk-21`).
@@ -176,13 +305,13 @@ Requirements: JDK 21 (auto-detected at `~/workspace/tools/jdk-21`).
 
 ```bash
 export OPENAI_API_KEY=sk-...
-java -cp "target/axiom-0.2.0.jar:lib/*" dev.axiom.demo.DemoAgent "What is 17*23, and save the answer as a note?"
+java -cp "target/axiom-0.3.0.jar:lib/*" dev.axiom.demo.DemoAgent "What is 17*23, and save the answer as a note?"
 ```
 
 ## Roadmap
 
-- **v0.3**: durable execution (crash recovery, Temporal-style), eval harness (prompt regression testing), A2A agent-to-agent protocol, streaming responses, published GAIA/SWE-bench scores
+- **v0.4**: durable idempotency keys for tool side effects, A2A authentication/push notifications, eval dataset versioning, hosted benchmark leaderboard
 
 ## Status
 
-v0.2.0 — MCP client, supervisor/worker teams, vector memory, sandboxed subprocess tools, token/cost budgets. 65 tests green.
+v0.3.0 — durable execution with crash recovery, typed eval harness, native A2A v1.0, streaming tokens, reproducible benchmark receipts. 96 tests green.

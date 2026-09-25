@@ -1,0 +1,214 @@
+package dev.axiom.durable;
+
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import dev.axiom.agent.AgentEvent;
+import dev.axiom.agent.AgentResult;
+import dev.axiom.budget.Budget;
+import dev.axiom.llm.ChatResponse;
+import dev.axiom.llm.ToolCallRequest;
+
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
+/**
+ * Serialization for the events stored in a {@link RunJournal}. Only the
+ * events needed to rebuild a run are round-tripped with full fidelity
+ * (RunStarted, LlmResponse, ToolCallFinished, RunFinished); the rest are
+ * stored for observability and replayed as faithfully as their payloads
+ * allow.
+ */
+final class JournalCodec {
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    private JournalCodec() {}
+
+    static String encodeLine(Map<String, Object> record) {
+        try {
+            return MAPPER.writeValueAsString(record);
+        } catch (Exception e) {
+            throw new DurableException("Failed to encode journal record", e);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    static Map<String, Object> decodeLine(String line) {
+        try {
+            return MAPPER.readValue(line, new TypeReference<>() {});
+        } catch (Exception e) {
+            throw new DurableException("Failed to decode journal line: " + truncate(line), e);
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // AgentEvent <-> Map
+    // ------------------------------------------------------------------
+
+    static Map<String, Object> eventToMap(AgentEvent event) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        if (event instanceof AgentEvent.RunStarted e) {
+            m.put("type", "RunStarted");
+            m.put("task", e.task());
+        } else if (event instanceof AgentEvent.LlmRequest e) {
+            m.put("type", "LlmRequest");
+            m.put("iteration", e.iteration());
+        } else if (event instanceof AgentEvent.LlmResponse e) {
+            m.put("type", "LlmResponse");
+            m.put("iteration", e.iteration());
+            m.put("response", responseToMap(e.response()));
+        } else if (event instanceof AgentEvent.ToolCallStarted e) {
+            m.put("type", "ToolCallStarted");
+            m.put("call", callToMap(e.call()));
+        } else if (event instanceof AgentEvent.ToolCallFinished e) {
+            m.put("type", "ToolCallFinished");
+            m.put("call", callToMap(e.call()));
+            m.put("result", e.result());
+            m.put("durationMs", e.durationMs());
+        } else if (event instanceof AgentEvent.ApprovalRequested e) {
+            m.put("type", "ApprovalRequested");
+            m.put("toolName", e.toolName());
+            m.put("arguments", e.arguments());
+        } else if (event instanceof AgentEvent.BudgetUpdated e) {
+            m.put("type", "BudgetUpdated");
+            m.put("charged", usageToMap(e.charged()));
+            m.put("snapshot", snapshotToMap(e.snapshot()));
+        } else if (event instanceof AgentEvent.RunFinished e) {
+            m.put("type", "RunFinished");
+            m.put("result", resultToMap(e.result()));
+        } else {
+            m.put("type", "Unknown");
+        }
+        return m;
+    }
+
+    @SuppressWarnings("unchecked")
+    static AgentEvent eventFromMap(Map<String, Object> m, java.time.Instant timestamp) {
+        String type = String.valueOf(m.get("type"));
+        return switch (type) {
+            case "RunStarted" -> new AgentEvent.RunStarted(timestamp, str(m.get("task")));
+            case "LlmRequest" -> new AgentEvent.LlmRequest(timestamp, num(m.get("iteration")));
+            case "LlmResponse" -> new AgentEvent.LlmResponse(timestamp, num(m.get("iteration")),
+                responseFromMap((Map<String, Object>) m.get("response")));
+            case "ToolCallStarted" -> new AgentEvent.ToolCallStarted(timestamp,
+                callFromMap((Map<String, Object>) m.get("call")));
+            case "ToolCallFinished" -> {
+                var call = callFromMap((Map<String, Object>) m.get("call"));
+                Object d = m.get("durationMs");
+                yield new AgentEvent.ToolCallFinished(timestamp, call, str(m.get("result")),
+                    d instanceof Number n ? n.longValue() : 0L);
+            }
+            case "ApprovalRequested" -> new AgentEvent.ApprovalRequested(timestamp,
+                str(m.get("toolName")), (Map<String, Object>) m.getOrDefault("arguments", Map.of()));
+            case "BudgetUpdated" -> new AgentEvent.BudgetUpdated(timestamp,
+                usageFromMap((Map<String, Object>) m.get("charged")),
+                snapshotFromMap((Map<String, Object>) m.get("snapshot")));
+            case "RunFinished" -> new AgentEvent.RunFinished(timestamp,
+                resultFromMap((Map<String, Object>) m.get("result")));
+            default -> new AgentEvent.RunStarted(timestamp, "");
+        };
+    }
+
+    static Map<String, Object> responseToMap(ChatResponse r) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("content", r.content());
+        List<Map<String, Object>> calls = new ArrayList<>();
+        if (r.toolCalls() != null) {
+            for (ToolCallRequest c : r.toolCalls()) calls.add(callToMap(c));
+        }
+        m.put("toolCalls", calls);
+        m.put("usage", usageToMap(r.usage()));
+        return m;
+    }
+
+    @SuppressWarnings("unchecked")
+    static ChatResponse responseFromMap(Map<String, Object> m) {
+        List<ToolCallRequest> calls = new ArrayList<>();
+        Object raw = m.get("toolCalls");
+        if (raw instanceof List<?> list) {
+            for (Object o : list) calls.add(callFromMap((Map<String, Object>) o));
+        }
+        return new ChatResponse(strOrNull(m.get("content")), calls,
+            usageFromMap((Map<String, Object>) m.get("usage")));
+    }
+
+    static Map<String, Object> callToMap(ToolCallRequest c) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("id", c.id());
+        m.put("name", c.name());
+        m.put("arguments", c.arguments() == null ? Map.of() : c.arguments());
+        return m;
+    }
+
+    @SuppressWarnings("unchecked")
+    static ToolCallRequest callFromMap(Map<String, Object> m) {
+        Object args = m.get("arguments");
+        return new ToolCallRequest(str(m.get("id")), str(m.get("name")),
+            args instanceof Map<?, ?> am ? (Map<String, Object>) am : Map.of());
+    }
+
+    static Map<String, Object> usageToMap(ChatResponse.TokenUsage u) {
+        if (u == null) u = ChatResponse.TokenUsage.empty();
+        return Map.of("promptTokens", u.promptTokens(),
+            "completionTokens", u.completionTokens(), "totalTokens", u.totalTokens());
+    }
+
+    static ChatResponse.TokenUsage usageFromMap(Map<String, Object> m) {
+        if (m == null) return ChatResponse.TokenUsage.empty();
+        return new ChatResponse.TokenUsage(num(m.get("promptTokens")),
+            num(m.get("completionTokens")), num(m.get("totalTokens")));
+    }
+
+    static Map<String, Object> snapshotToMap(Budget.Snapshot s) {
+        return Map.of("inputTokens", s.inputTokens(), "outputTokens", s.outputTokens(),
+            "totalTokens", s.totalTokens(), "costUsd", s.costUsd(),
+            "maxTokens", s.maxTokens(), "maxCostUsd", s.maxCostUsd());
+    }
+
+    static Budget.Snapshot snapshotFromMap(Map<String, Object> m) {
+        Object maxT = m.get("maxTokens");
+        Object maxC = m.get("maxCostUsd");
+        return new Budget.Snapshot(num(m.get("inputTokens")), num(m.get("outputTokens")),
+            num(m.get("totalTokens")), dbl(m.get("costUsd")),
+            maxT instanceof Number n ? n.longValue() : Budget.UNLIMITED_TOKENS,
+            maxC instanceof Number n ? n.doubleValue() : Budget.UNLIMITED_COST);
+    }
+
+    static Map<String, Object> resultToMap(AgentResult r) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("output", r.output());
+        m.put("iterations", r.iterations());
+        m.put("toolCallsMade", r.toolCallsMade());
+        m.put("usage", usageToMap(r.tokenUsage()));
+        m.put("completed", r.completed());
+        return m;
+    }
+
+    static AgentResult resultFromMap(Map<String, Object> m) {
+        return new AgentResult(strOrNull(m.get("output")), num(m.get("iterations")),
+            num(m.get("toolCallsMade")),
+            usageFromMap((Map<String, Object>) m.get("usage")),
+            Boolean.TRUE.equals(m.get("completed")));
+    }
+
+    private static String str(Object o) {
+        return o == null ? "" : String.valueOf(o);
+    }
+
+    private static String strOrNull(Object o) {
+        return o == null ? null : String.valueOf(o);
+    }
+
+    private static int num(Object o) {
+        return o instanceof Number n ? n.intValue() : 0;
+    }
+
+    private static double dbl(Object o) {
+        return o instanceof Number n ? n.doubleValue() : 0.0;
+    }
+
+    private static String truncate(String s) {
+        return s != null && s.length() > 200 ? s.substring(0, 200) + "…" : s;
+    }
+}

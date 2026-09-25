@@ -20,6 +20,7 @@ public final class AgentConfig {
     private final ApprovalHandler approvalHandler;
     private final Memory memory;
     private final Budget budget;
+    private final java.nio.file.Path journalRoot;
     private final List<Consumer<AgentEvent>> eventListeners;
 
     private AgentConfig(Builder b) {
@@ -31,6 +32,7 @@ public final class AgentConfig {
         this.approvalHandler = b.approvalHandler;
         this.memory = b.memory;
         this.budget = b.budget;
+        this.journalRoot = b.journalRoot;
         this.eventListeners = List.copyOf(b.eventListeners);
     }
 
@@ -43,6 +45,13 @@ public final class AgentConfig {
     public Memory memory() { return memory; }
     /** The run's token/cost budget, or null if none is configured. */
     public Budget budget() { return budget; }
+    /**
+     * Root directory for durable run journals, or null when durability is
+     * off. When set, every run appends its events to
+     * {@code <root>/<runId>/journal.jsonl} and can be resumed after a crash
+     * via {@link dev.axiom.durable.AgentRun#resumeFrom}.
+     */
+    public java.nio.file.Path journalRoot() { return journalRoot; }
     public List<Consumer<AgentEvent>> eventListeners() { return eventListeners; }
 
     void emit(AgentEvent event) {
@@ -69,6 +78,7 @@ public final class AgentConfig {
         private ApprovalHandler approvalHandler = ApprovalHandler.allowAll();
         private Memory memory;
         private Budget budget;
+        private java.nio.file.Path journalRoot;
         private final List<Consumer<AgentEvent>> eventListeners = new ArrayList<>();
 
         public Builder withClient(LlmClient client) { this.client = client; return this; }
@@ -97,6 +107,13 @@ public final class AgentConfig {
          * breached; spend is visible via {@link AgentEvent.BudgetUpdated}.
          */
         public Builder withBudget(Budget budget) { this.budget = budget; return this; }
+        /**
+         * Enable durable execution: every run journals its events to
+         * {@code <root>/<runId>/journal.jsonl}. After a crash, resume with
+         * {@link dev.axiom.durable.AgentRun#resumeFrom(Path, String, AgentConfig)} —
+         * completed tool calls are replayed from the journal, never re-executed.
+         */
+        public Builder withJournalRoot(java.nio.file.Path root) { this.journalRoot = root; return this; }
         public Builder onEvent(Consumer<AgentEvent> listener) {
             this.eventListeners.add(listener);
             return this;

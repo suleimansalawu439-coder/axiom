@@ -33,7 +33,9 @@ mkdir -p target/classes target/test-classes
 
 echo "==> Compiling main sources..."
 javac -parameters -d target/classes -cp "$CP_MAIN" $(find src/main/java -name "*.java")
-cp -r src/main/resources/* target/classes/
+if [ -d src/main/resources ]; then
+  cp -r src/main/resources/* target/classes/
+fi
 
 echo "==> Validating @Tool schemas with the Axiom ToolProcessor..."
 # The processor is compiled as part of main sources, so it cannot validate
@@ -58,8 +60,13 @@ java -jar lib/junit-platform-console-standalone-1.10.3.jar execute \
   --select-class dev.axiom.teams.SupervisorTeamTest \
   --select-class dev.axiom.memory.VectorMemoryTest \
   --select-class dev.axiom.memory.OpenAiEmbeddingsTest \
-  --select-class dev.axiom.budget.BudgetTest 2>&1 | tail -12
+  --select-class dev.axiom.budget.BudgetTest \
+  --select-class dev.axiom.llm.StreamingClientTest \
+  --select-class dev.axiom.durable.DurableRunTest \
+  --select-class dev.axiom.eval.EvalHarnessTest \
+  --select-class dev.axiom.a2a.A2aTest \
+  --select-class dev.axiom.bench.BenchRunnerTest 2>&1 | tail -12
 
-echo "==> Packaging axiom-0.2.0.jar..."
-jar --create --file target/axiom-0.2.0.jar -C target/classes .
-echo "Done: target/axiom-0.2.0.jar"
+echo "==> Packaging axiom-0.3.0.jar..."
+jar --create --file target/axiom-0.3.0.jar -C target/classes .
+echo "Done: target/axiom-0.3.0.jar"

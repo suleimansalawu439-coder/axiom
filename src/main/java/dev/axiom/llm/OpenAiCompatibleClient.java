@@ -8,6 +8,7 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.*;
 
@@ -16,7 +17,7 @@ import java.util.*;
  * endpoint: OpenAI, Azure OpenAI, Ollama, vLLM, LM Studio, Together, etc.
  * Uses only {@code java.net.http} — no SDK dependencies.
  */
-public final class OpenAiCompatibleClient implements LlmClient {
+public final class OpenAiCompatibleClient implements StreamingLlmClient {
     private final HttpClient http;
     private final ObjectMapper mapper = new ObjectMapper();
     private final URI endpoint;
@@ -151,15 +152,135 @@ public final class OpenAiCompatibleClient implements LlmClient {
 
         ChatResponse.TokenUsage usage = ChatResponse.TokenUsage.empty();
         if (root.get("usage") instanceof Map<?, ?> u) {
-            Map<String, Object> um = (Map<String, Object>) u;
-            usage = new ChatResponse.TokenUsage(
-                num(um.get("prompt_tokens")), num(um.get("completion_tokens")), num(um.get("total_tokens")));
+            usage = readUsage((Map<String, Object>) u);
         }
         return new ChatResponse(content, toolCalls, usage);
     }
 
     private static long num(Object o) {
         return o instanceof Number n ? n.longValue() : 0L;
+    }
+
+    private static ChatResponse.TokenUsage readUsage(Map<String, Object> um) {
+        return new ChatResponse.TokenUsage(
+            num(um.get("prompt_tokens")), num(um.get("completion_tokens")), num(um.get("total_tokens")));
+    }
+
+    // ------------------------------------------------------------------
+    // Streaming (Server-Sent Events)
+    // ------------------------------------------------------------------
+
+    /**
+     * Chat with {@code stream: true}: tokens are delivered to the listener in
+     * arrival order and the fully assembled {@link ChatResponse} is returned.
+     * Fragmented {@code tool_calls} deltas are merged by index (arguments are
+     * concatenated, then parsed as JSON once complete).
+     */
+    @Override
+    public ChatResponse chatStream(List<ChatMessage> messages, List<ToolDefinition> tools,
+                                   LlmOptions options, TokenListener listener) {
+        try {
+            Map<String, Object> body = buildRequestBody(messages, tools, options);
+            body.put("stream", true);
+            body.put("stream_options", Map.of("include_usage", true));
+            String json = mapper.writeValueAsString(body);
+            HttpRequest req = HttpRequest.newBuilder(endpoint)
+                .timeout(Duration.ofMinutes(5))
+                .header("Content-Type", "application/json")
+                .header("Accept", "text/event-stream")
+                .POST(HttpRequest.BodyPublishers.ofString(json))
+                .header("Authorization", apiKey != null && !apiKey.isBlank() ? "Bearer " + apiKey : "")
+                .build();
+            // Drop the empty Authorization header when no key is set.
+            if (apiKey == null || apiKey.isBlank()) {
+                req = HttpRequest.newBuilder(endpoint)
+                    .timeout(Duration.ofMinutes(5))
+                    .header("Content-Type", "application/json")
+                    .header("Accept", "text/event-stream")
+                    .POST(HttpRequest.BodyPublishers.ofString(json))
+                    .build();
+            }
+
+            HttpResponse<java.io.InputStream> resp =
+                http.send(req, HttpResponse.BodyHandlers.ofInputStream());
+            if (resp.statusCode() != 200) {
+                String err;
+                try (var in = resp.body()) {
+                    err = new String(in.readAllBytes(), StandardCharsets.UTF_8);
+                }
+                throw new LlmException(
+                    "LLM streaming request failed with HTTP %d: %s".formatted(resp.statusCode(), truncate(err, 500)));
+            }
+            return parseSseStream(resp.body(), listener);
+        } catch (LlmException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new LlmException("LLM streaming request failed: " + e.getMessage(), e);
+        }
+    }
+
+    /** Accumulates one tool call's fragments across SSE chunks. */
+    private static final class ToolCallDelta {
+        String id;
+        String name;
+        final StringBuilder arguments = new StringBuilder();
+    }
+
+    /** Parse an SSE stream into the assembled response (pure function — unit-testable). */
+    @SuppressWarnings("unchecked")
+    ChatResponse parseSseStream(java.io.InputStream in, TokenListener listener) throws Exception {
+        StringBuilder content = new StringBuilder();
+        Map<Integer, ToolCallDelta> deltas = new TreeMap<>();
+        ChatResponse.TokenUsage usage = ChatResponse.TokenUsage.empty();
+        try (var reader = new java.io.BufferedReader(
+                new java.io.InputStreamReader(in, StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                String t = line.trim();
+                if (t.isEmpty() || t.startsWith(":")) continue; // heartbeat / comment
+                if (!t.startsWith("data:")) continue;
+                String data = t.substring(5).trim();
+                if (data.equals("[DONE]")) break;
+                Map<String, Object> chunk = mapper.readValue(data, new TypeReference<>() {});
+                if (chunk.get("usage") instanceof Map<?, ?> u) {
+                    usage = readUsage((Map<String, Object>) u);
+                }
+                Object rawChoices = chunk.get("choices");
+                if (!(rawChoices instanceof List<?> choices) || choices.isEmpty()) continue;
+                Object rawDelta = ((Map<String, Object>) choices.get(0)).get("delta");
+                if (!(rawDelta instanceof Map<?, ?> rawDeltaMap)) continue;
+                Map<String, Object> delta = (Map<String, Object>) rawDeltaMap;
+                Object c = delta.get("content");
+                if (c instanceof String s && !s.isEmpty()) {
+                    content.append(s);
+                    listener.onToken(s);
+                }
+                Object rawToolCalls = delta.get("tool_calls");
+                if (rawToolCalls instanceof List<?> list) {
+                    for (Object o : list) {
+                        Map<String, Object> d = (Map<String, Object>) o;
+                        int index = d.get("index") instanceof Number n ? n.intValue() : 0;
+                        ToolCallDelta acc = deltas.computeIfAbsent(index, k -> new ToolCallDelta());
+                        if (d.get("id") instanceof String id) acc.id = id;
+                        Object fn = d.get("function");
+                        if (fn instanceof Map<?, ?> fmRaw) {
+                            Map<String, Object> fm = (Map<String, Object>) fmRaw;
+                            if (fm.get("name") instanceof String name) acc.name = name;
+                            if (fm.get("arguments") instanceof String a) acc.arguments.append(a);
+                        }
+                    }
+                }
+            }
+        }
+        List<ToolCallRequest> toolCalls = new ArrayList<>();
+        for (ToolCallDelta d : deltas.values()) {
+            String argsJson = d.arguments.toString();
+            Map<String, Object> args = (argsJson == null || argsJson.isBlank())
+                ? Map.of()
+                : mapper.readValue(argsJson, new TypeReference<>() {});
+            toolCalls.add(new ToolCallRequest(d.id, d.name, args));
+        }
+        return new ChatResponse(content.toString(), toolCalls, usage);
     }
 
     private static String truncate(String s, int max) {

@@ -1,0 +1,1 @@
+[{"content":"I'll fix greet.txt with the run tool.","tool_calls":[{"arguments":{"command":["sh","-c","printf 'Hello, world!' > greet.txt"]},"id":"c1","name":"run"}],"usage":{"completion_tokens":20,"prompt_tokens":80,"total_tokens":100}},{"content":"Done","tool_calls":[],"usage":{"completion_tokens":4,"prompt_tokens":95,"total_tokens":99}}]

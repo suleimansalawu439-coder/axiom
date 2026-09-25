@@ -18,6 +18,8 @@ import java.util.*;
  */
 public final class ToolRegistry {
     private final Map<String, ToolDefinition> tools = new LinkedHashMap<>();
+    /** Tool name -> fully-qualified holder class, for annotated tools only. */
+    private final Map<String, String> toolHolderClasses = new LinkedHashMap<>();
     private final ObjectMapper mapper = new ObjectMapper();
 
     /** Register all {@code @Tool} methods on the given instance. */
@@ -30,6 +32,7 @@ public final class ToolRegistry {
                 name, ann.description(), buildSchema(method),
                 ann.requiresApproval(), ann.timeoutSeconds(),
                 reflectiveInvoker(toolHolder, method, name), method));
+            toolHolderClasses.put(name, toolHolder.getClass().getName());
         }
         return this;
     }
@@ -49,6 +52,16 @@ public final class ToolRegistry {
 
     public Optional<ToolDefinition> find(String name) {
         return Optional.ofNullable(tools.get(name));
+    }
+
+    /**
+     * Holder class names for {@code @Tool}-registered tools, keyed by tool
+     * name. Used by durable resume to rebuild the registry from the journal
+     * without the original holder instances. Synthetic tools (MCP, delegates)
+     * have no entry.
+     */
+    public Map<String, String> toolHolderClasses() {
+        return Collections.unmodifiableMap(toolHolderClasses);
     }
 
     /** Invoke a tool by name with raw JSON arguments from the LLM. */

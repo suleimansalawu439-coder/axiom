@@ -137,6 +137,10 @@ try {
 
 Every LLM call is charged; breaching a limit throws `BudgetExceededException` (carrying the full snapshot). `BudgetUpdated` events fire after every call — even the breaching one — so UIs can render live cost meters. Budgets are thread-safe and shareable across a supervisor team.
 
+## v0.5.1 — what's new
+
+Proxy support for sandboxed and corporate networks. `OpenAiCompatibleClient` now honors the standard `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` and `NO_PROXY` environment variables — the same ones curl, Python, and Node read — including proxy authentication and `NO_PROXY` bypass rules (exact host, subdomain, `host:port`, `*`). Java's `HttpClient` ignores these variables on its own, which previously turned every call behind an egress proxy into a TLS failure. New `dev.axiom.llm.ProxyConfig` holds the parsing/selection logic with unit tests; no API changes.
+
 ## v0.5 — what's new
 
 A correctness release: every claim the framework makes about reliability is now enforced, not documented.
@@ -337,7 +341,7 @@ var agent = new ReActAgent(AgentConfig.builder()
 agent.run("Tell me a story");   // tokens print live; non-streaming clients are unaffected
 ```
 
-Works against any OpenAI-compatible endpoint (OpenAI, Azure, Ollama, vLLM…); usage is read from `stream_options.include_usage` chunks when the provider sends them.
+Works against any OpenAI-compatible endpoint (OpenAI, Azure, Ollama, vLLM…); usage is read from `stream_options.include_usage` chunks when the provider sends them. Behind a proxy, set `HTTPS_PROXY`/`HTTP_PROXY` (and optionally `NO_PROXY`); credentials in the URL are used for proxy auth only and never sent to the model provider.
 
 ### Reproducible benchmark receipts (`dev.axiom.bench`)
 
@@ -345,12 +349,12 @@ GAIA-style and SWE-bench-style runners that record machine-readable receipts —
 
 ```bash
 # Offline / deterministic (default): scripted model fixtures, REAL tool execution
-java -cp "target/axiom-0.5.0.jar:lib/*" dev.axiom.bench.BenchMain
+java -cp "target/axiom-0.5.1.jar:lib/*" dev.axiom.bench.BenchMain
 # -> benchmarks/receipts/receipt-fixture-<timestamp>.json
 
 # Live: against a real model, free or paid
 AXIOM_BENCH_PROVIDER=gemini GEMINI_API_KEY=... \
-  java -cp "target/axiom-0.5.0.jar:lib/*" dev.axiom.bench.BenchMain --live
+  java -cp "target/axiom-0.5.1.jar:lib/*" dev.axiom.bench.BenchMain --live
 # -> benchmarks/receipts/receipt-live-gemini-<timestamp>.json
 ```
 
@@ -401,7 +405,7 @@ If `webSearch`'s signature and its schema ever disagree, the build fails. That's
 No Maven required (a `pom.xml` is included for standard environments):
 
 ```bash
-./build.sh   # compiles, runs all tests, packages target/axiom-0.5.0.jar
+./build.sh   # compiles, runs all tests, packages target/axiom-0.5.1.jar
 ```
 
 Requirements: JDK 21 (auto-detected at `~/workspace/tools/jdk-21`).
@@ -410,7 +414,7 @@ Requirements: JDK 21 (auto-detected at `~/workspace/tools/jdk-21`).
 
 ```bash
 export OPENAI_API_KEY=sk-...
-java -cp "target/axiom-0.5.0.jar:lib/*" dev.axiom.demo.DemoAgent "What is 17*23, and save the answer as a note?"
+java -cp "target/axiom-0.5.1.jar:lib/*" dev.axiom.demo.DemoAgent "What is 17*23, and save the answer as a note?"
 ```
 
 ## Roadmap
@@ -419,4 +423,5 @@ java -cp "target/axiom-0.5.0.jar:lib/*" dev.axiom.demo.DemoAgent "What is 17*23,
 
 ## Status
 
+v0.5.1 — proxy support (`HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY`/`NO_PROXY` honored with auth and bypass rules), 188 tests green.
 v0.5.0 — honest streaming retries (buffer-per-attempt, `Retry-After`), streaming cache with token replay, exactly-once durable side-effect ledger with `@Tool(idempotent)`, compile-time schema single-source-of-truth (unique tool names, Jackson-deserializability checks, runtime reads the generated artifact), trajectory eval scorers + `EvalGate` CI gate, free-tier benchmark path (`gemini`/`openrouter`/`groq`/`ollama`, paced, $0 receipts with honesty notes). 177 tests green.

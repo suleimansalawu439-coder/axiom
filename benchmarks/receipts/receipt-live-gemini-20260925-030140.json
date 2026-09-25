@@ -1,0 +1,62 @@
+{
+  "framework" : "axiom",
+  "frameworkVersion" : "0.5.0",
+  "model" : "gemini-2.0-flash",
+  "mode" : "live-gemini",
+  "timestamp" : "2026-09-25T03:01:40.325626113Z",
+  "notes" : "Representative 4-task subset (3 GAIA-style + 1 SWE-bench-style), not the full GAIA/SWE-bench suites. Provider: gemini (https://aistudio.google.com/apikey — free tier, no card required). Rate-limited with 4000ms pacing between tasks; HTTP 429 retried with Retry-After honored. Cost basis: provider free tier ($0).",
+  "results" : [ {
+    "taskId" : "gaia-arithmetic",
+    "kind" : "gaia",
+    "passed" : false,
+    "output" : null,
+    "promptTokens" : 0,
+    "completionTokens" : 0,
+    "totalTokens" : 0,
+    "costUsd" : 0.0,
+    "latencyMs" : 133042,
+    "detail" : "harness error: dev.axiom.llm.LlmException: LLM streaming request failed: Unrecognized SSL message, plaintext connection?"
+  }, {
+    "taskId" : "gaia-two-step",
+    "kind" : "gaia",
+    "passed" : false,
+    "output" : null,
+    "promptTokens" : 0,
+    "completionTokens" : 0,
+    "totalTokens" : 0,
+    "costUsd" : 0.0,
+    "latencyMs" : 108688,
+    "detail" : "harness error: dev.axiom.llm.LlmException: LLM streaming request failed: Unrecognized SSL message, plaintext connection?"
+  }, {
+    "taskId" : "gaia-file-lookup",
+    "kind" : "gaia",
+    "passed" : false,
+    "output" : null,
+    "promptTokens" : 0,
+    "completionTokens" : 0,
+    "totalTokens" : 0,
+    "costUsd" : 0.0,
+    "latencyMs" : 135552,
+    "detail" : "harness error: dev.axiom.llm.LlmException: LLM streaming request failed: Unrecognized SSL message, plaintext connection?"
+  }, {
+    "taskId" : "swe-fix-greeting",
+    "kind" : "swe",
+    "passed" : false,
+    "output" : null,
+    "promptTokens" : 0,
+    "completionTokens" : 0,
+    "totalTokens" : 0,
+    "costUsd" : 0.0,
+    "latencyMs" : 127233,
+    "detail" : "harness error: dev.axiom.llm.LlmException: LLM streaming request failed: Unrecognized SSL message, plaintext connection?"
+  } ],
+  "totals" : {
+    "tasks" : 4,
+    "passed" : 0,
+    "failed" : 4,
+    "passRate" : 0.0,
+    "totalTokens" : 0,
+    "totalCostUsd" : 0.0,
+    "totalLatencyMs" : 504515
+  }
+}

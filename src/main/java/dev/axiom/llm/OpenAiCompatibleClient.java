@@ -28,9 +28,16 @@ public final class OpenAiCompatibleClient implements StreamingLlmClient {
     private final String model;
 
     public OpenAiCompatibleClient(String baseUrl, String apiKey, String model) {
-        this.http = HttpClient.newBuilder()
-            .connectTimeout(Duration.ofSeconds(30))
-            .build();
+        var proxySettings = ProxyConfig.fromEnv();
+        HttpClient.Builder builder = HttpClient.newBuilder()
+            .connectTimeout(Duration.ofSeconds(30));
+        // Honor HTTPS_PROXY/HTTP_PROXY/NO_PROXY like every other HTTP stack does;
+        // without this, a sandbox or corporate egress proxy breaks all TLS calls.
+        proxySettings.ifPresent(s -> {
+            builder.proxy(ProxyConfig.selectorFor(s));
+            ProxyConfig.authenticatorFor(s).ifPresent(builder::authenticator);
+        });
+        this.http = builder.build();
         String normalized = baseUrl.endsWith("/") ? baseUrl : baseUrl + "/";
         this.endpoint = URI.create(normalized + "chat/completions");
         this.apiKey = apiKey;

@@ -1,0 +1,62 @@
+{
+  "framework" : "axiom",
+  "frameworkVersion" : "0.5.0",
+  "model" : "gemini-2.0-flash",
+  "mode" : "live-gemini",
+  "timestamp" : "2026-09-25T03:12:40.668270037Z",
+  "notes" : "Representative 4-task subset (3 GAIA-style + 1 SWE-bench-style), not the full GAIA/SWE-bench suites. Provider: gemini (https://aistudio.google.com/apikey — free tier, no card required). Rate-limited with 4000ms pacing between tasks; HTTP 429 retried with Retry-After honored. Cost basis: provider free tier ($0).",
+  "results" : [ {
+    "taskId" : "gaia-arithmetic",
+    "kind" : "gaia",
+    "passed" : false,
+    "output" : null,
+    "promptTokens" : 0,
+    "completionTokens" : 0,
+    "totalTokens" : 0,
+    "costUsd" : 0.0,
+    "latencyMs" : 124418,
+    "detail" : "harness error: dev.axiom.llm.LlmException: LLM streaming request failed: Invalid status line: \"muse: Other TCP connections is turned off for this assistant. To allow it, ask the user to open Muse settings -> Permissions -> Direct network protocols and switch other_tcp from Deny to Ask.\""
+  }, {
+    "taskId" : "gaia-two-step",
+    "kind" : "gaia",
+    "passed" : false,
+    "output" : null,
+    "promptTokens" : 0,
+    "completionTokens" : 0,
+    "totalTokens" : 0,
+    "costUsd" : 0.0,
+    "latencyMs" : 135821,
+    "detail" : "harness error: dev.axiom.llm.LlmException: LLM streaming request failed: Invalid status line: \"muse: Other TCP connections is turned off for this assistant. To allow it, ask the user to open Muse settings -> Permissions -> Direct network protocols and switch other_tcp from Deny to Ask.\""
+  }, {
+    "taskId" : "gaia-file-lookup",
+    "kind" : "gaia",
+    "passed" : false,
+    "output" : null,
+    "promptTokens" : 0,
+    "completionTokens" : 0,
+    "totalTokens" : 0,
+    "costUsd" : 0.0,
+    "latencyMs" : 130462,
+    "detail" : "harness error: dev.axiom.llm.LlmException: LLM streaming request failed: Invalid status line: \"muse: Other TCP connections is turned off for this assistant. To allow it, ask the user to open Muse settings -> Permissions -> Direct network protocols and switch other_tcp from Deny to Ask.\""
+  }, {
+    "taskId" : "swe-fix-greeting",
+    "kind" : "swe",
+    "passed" : false,
+    "output" : null,
+    "promptTokens" : 0,
+    "completionTokens" : 0,
+    "totalTokens" : 0,
+    "costUsd" : 0.0,
+    "latencyMs" : 132374,
+    "detail" : "harness error: dev.axiom.llm.LlmException: LLM streaming request failed: Invalid status line: \"muse: Other TCP connections is turned off for this assistant. To allow it, ask the user to open Muse settings -> Permissions -> Direct network protocols and switch other_tcp from Deny to Ask.\""
+  } ],
+  "totals" : {
+    "tasks" : 4,
+    "passed" : 0,
+    "failed" : 4,
+    "passRate" : 0.0,
+    "totalTokens" : 0,
+    "totalCostUsd" : 0.0,
+    "totalLatencyMs" : 523075
+  }
+}

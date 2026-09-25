@@ -7,7 +7,9 @@ import dev.axiom.agent.AgentResult;
 import dev.axiom.budget.Budget;
 import dev.axiom.llm.ChatResponse;
 import dev.axiom.llm.ToolCallRequest;
+import dev.axiom.verify.Certificate;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -82,6 +84,16 @@ final class JournalCodec {
             m.put("guardrailName", e.guardrailName());
             m.put("side", e.side());
             m.put("reason", e.reason());
+        } else if (event instanceof AgentEvent.CertificateIssued e) {
+            m.put("type", "CertificateIssued");
+            m.put("certificate", certificateToMap(e.certificate()));
+        } else if (event instanceof AgentEvent.CertificateVerified e) {
+            m.put("type", "CertificateVerified");
+            m.put("callId", e.callId());
+            m.put("toolName", e.toolName());
+            m.put("verifierKind", e.verifierKind());
+            m.put("ok", e.ok());
+            m.put("detail", e.detail());
         } else {
             m.put("type", "Unknown");
         }
@@ -113,6 +125,11 @@ final class JournalCodec {
                 resultFromMap(reqMap(m.get("result"), "RunFinished.result")));
             case "GuardrailBlocked" -> new AgentEvent.GuardrailBlocked(timestamp,
                 str(m.get("guardrailName")), str(m.get("side")), str(m.get("reason")));
+            case "CertificateIssued" -> new AgentEvent.CertificateIssued(timestamp,
+                certificateFromMap(reqMap(m.get("certificate"), "CertificateIssued.certificate")));
+            case "CertificateVerified" -> new AgentEvent.CertificateVerified(timestamp,
+                str(m.get("callId")), str(m.get("toolName")), str(m.get("verifierKind")),
+                Boolean.TRUE.equals(m.get("ok")), str(m.get("detail")));
             // No lenient fallback: an unknown event type means the journal is
             // corrupt (or from an incompatible version) — resuming it as a
             // blank RunStarted would silently poison the transcript.
@@ -166,6 +183,48 @@ final class JournalCodec {
         return new ToolCallRequest(str(m.get("id")), str(m.get("name")),
             args instanceof Map<?, ?> am ? (Map<String, Object>) am : Map.of(),
             strOrNull(m.get("thoughtSignature")));
+    }
+
+    static Map<String, Object> certificateToMap(Certificate c) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("toolName", c.toolName());
+        m.put("callId", c.callId());
+        m.put("argsHash", c.argsHash());
+        List<Map<String, Object>> claims = new ArrayList<>();
+        for (var claim : c.claims()) {
+            Map<String, Object> cm = new LinkedHashMap<>();
+            cm.put("kind", claim.kind());
+            cm.put("path", claim.path());
+            cm.put("expectedSha256", claim.expectedSha256());
+            cm.put("detail", claim.detail());
+            claims.add(cm);
+        }
+        m.put("claims", claims);
+        m.put("verifierKind", c.verifierKind());
+        m.put("issuedAt", c.issuedAt().toString());
+        return m;
+    }
+
+    static Certificate certificateFromMap(Map<String, Object> m) {
+        List<Certificate.EffectClaim> claims = new ArrayList<>();
+        Object raw = m.get("claims");
+        if (raw instanceof List<?> list) {
+            for (Object o : list) {
+                if (o instanceof Map<?, ?> cm) {
+                    claims.add(new Certificate.EffectClaim(
+                        str(cm.get("kind")), str(cm.get("path")),
+                        strOrNull(cm.get("expectedSha256")), str(cm.get("detail"))));
+                }
+            }
+        }
+        Instant issuedAt;
+        try {
+            issuedAt = Instant.parse(str(m.get("issuedAt")));
+        } catch (Exception e) {
+            issuedAt = Instant.EPOCH;
+        }
+        return new Certificate(str(m.get("toolName")), str(m.get("callId")),
+            str(m.get("argsHash")), claims, str(m.get("verifierKind")), issuedAt);
     }
 
     static Map<String, Object> usageToMap(ChatResponse.TokenUsage u) {

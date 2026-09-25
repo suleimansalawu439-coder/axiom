@@ -3,6 +3,7 @@ package dev.axiom.agent;
 import dev.axiom.budget.Budget;
 import dev.axiom.llm.ChatResponse;
 import dev.axiom.llm.ToolCallRequest;
+import dev.axiom.verify.Certificate;
 
 import java.time.Instant;
 import java.util.Map;
@@ -17,7 +18,8 @@ public sealed interface AgentEvent permits
         AgentEvent.StreamToken,
         AgentEvent.ToolCallStarted, AgentEvent.ToolCallFinished,
         AgentEvent.ApprovalRequested, AgentEvent.BudgetUpdated,
-        AgentEvent.GuardrailBlocked, AgentEvent.RunFinished {
+        AgentEvent.GuardrailBlocked, AgentEvent.RunFinished,
+        AgentEvent.CertificateIssued, AgentEvent.CertificateVerified {
 
     Instant timestamp();
 
@@ -50,5 +52,20 @@ public sealed interface AgentEvent permits
      */
     record GuardrailBlocked(Instant timestamp, String guardrailName,
                             String side, String reason) implements AgentEvent {}
+    /**
+     * Emitted right after an attested tool's body returns: the verifier's
+     * independent observation of the tool's effect, captured as a
+     * {@link Certificate}. See {@code dev.axiom.verify}.
+     */
+    record CertificateIssued(Instant timestamp, Certificate certificate)
+        implements AgentEvent {}
+    /**
+     * Emitted after a certificate is independently re-verified. {@code ok}
+     * is false when verification failed — the run aborts fail-closed right
+     * after this event with a {@link dev.axiom.verify.VerificationException}.
+     */
+    record CertificateVerified(Instant timestamp, String callId, String toolName,
+                               String verifierKind, boolean ok, String detail)
+        implements AgentEvent {}
     record RunFinished(Instant timestamp, AgentResult result) implements AgentEvent {}
 }

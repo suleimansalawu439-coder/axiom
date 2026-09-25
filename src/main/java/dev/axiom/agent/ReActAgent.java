@@ -14,6 +14,10 @@ import dev.axiom.output.StructuredOutputException;
 import dev.axiom.tools.ToolDefinition;
 import dev.axiom.tools.ToolInvocationException;
 import dev.axiom.tools.ToolRegistry;
+import dev.axiom.verify.AttestedTool;
+import dev.axiom.verify.Certificate;
+import dev.axiom.verify.VerificationException;
+import dev.axiom.verify.Verifier;
 
 import java.time.Instant;
 import java.util.ArrayList;
@@ -567,6 +571,11 @@ public final class ReActAgent {
             } catch (ToolInvocationException e) {
                 // Feed the error back so the model can self-correct.
                 result = "ERROR: " + e.getMessage();
+            } catch (VerificationException ve) {
+                // Fail-closed: a verification failure aborts the run. It is
+                // never converted into a model observation — a tool whose
+                // effects cannot be confirmed must not be reasoned around.
+                throw ve;
             } catch (Exception e) {
                 result = "ERROR: unexpected failure: " + e.getMessage();
             }
@@ -631,7 +640,45 @@ public final class ReActAgent {
         if (journal != null) {
             journal.appendToolCallCompleted(idemKey, result);
         }
+        // Proof-carrying tools: attest the effect independently, then
+        // re-verify the certificate — all journaled. Only for tool bodies
+        // that actually ran (error observations have nothing to attest).
+        // On resume the recorded result is replayed instead, so the
+        // journaled certificates stand as the record.
+        if (!result.startsWith("ERROR:")
+                && def.invoker() instanceof AttestedTool.AttestingInvoker ai) {
+            verifyAttestedCall(def.name(), call, ai.verifier(), result);
+        }
         return result;
+    }
+
+    /**
+     * Attest and independently re-verify an attested tool call, journaling
+     * both as first-class events. Any failure throws
+     * {@link VerificationException}, which aborts the run fail-closed
+     * (see {@link #executeToolCall}).
+     */
+    private void verifyAttestedCall(String toolName, ToolCallRequest call,
+                                    Verifier verifier, String result) {
+        Certificate cert;
+        try {
+            cert = verifier.attest(toolName, call.id(), call.arguments(), result);
+        } catch (VerificationException ve) {
+            emit(new AgentEvent.CertificateVerified(Instant.now(), call.id(),
+                toolName, verifier.kind(), false,
+                "attestation failed: " + ve.getMessage()));
+            throw ve;
+        }
+        emit(new AgentEvent.CertificateIssued(Instant.now(), cert));
+        try {
+            verifier.check(cert);
+        } catch (VerificationException ve) {
+            emit(new AgentEvent.CertificateVerified(Instant.now(), call.id(),
+                toolName, verifier.kind(), false, ve.getMessage()));
+            throw ve;
+        }
+        emit(new AgentEvent.CertificateVerified(Instant.now(), call.id(),
+            toolName, verifier.kind(), true, "independent re-verification passed"));
     }
 
     /**

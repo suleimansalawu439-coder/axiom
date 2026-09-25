@@ -57,6 +57,19 @@ public final class ToolRegistry {
         return this;
     }
 
+    /**
+     * Replace an existing tool definition with the same name — e.g. with an
+     * {@code AttestedTool} wrapper. Throws when no definition with that name
+     * is registered.
+     */
+    public ToolRegistry replace(ToolDefinition definition) {
+        if (!tools.containsKey(definition.name())) {
+            throw new IllegalStateException("No such tool to replace: " + definition.name());
+        }
+        tools.put(definition.name(), definition);
+        return this;
+    }
+
     public Collection<ToolDefinition> all() {
         return Collections.unmodifiableCollection(tools.values());
     }

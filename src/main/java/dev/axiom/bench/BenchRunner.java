@@ -82,12 +82,15 @@ public final class BenchRunner {
             }
             BenchAgent agent = agentFactory.apply(task, workdir);
             AgentResult result = agent.run(task.prompt());
+            TaskTrace trace = TaskTrace.fromEvents(agent.events());
             boolean passed;
             String detail;
+            String testOutput = null;
             if (task.isSwe()) {
-                int exit = runTestCommand(workdir, task.testCommand());
-                passed = exit == 0;
-                detail = "testCommand <%s> exited %d".formatted(task.testCommand(), exit);
+                TestOutcome outcome = runTestCommand(workdir, task.testCommand());
+                testOutput = outcome.output();
+                passed = outcome.exitCode() == 0;
+                detail = "testCommand <%s> exited %d".formatted(task.testCommand(), outcome.exitCode());
             } else {
                 passed = result.output() != null
                     && result.output().contains(task.expectedOutputContains());
@@ -99,17 +102,32 @@ public final class BenchRunner {
                 result.tokenUsage().completionTokens()).orElse(0.0);
             return new TaskResult(task.id(), task.kind(), passed, result.output(),
                 result.tokenUsage().promptTokens(), result.tokenUsage().completionTokens(),
-                cost, latencyMs, detail);
+                cost, latencyMs, detail,
+                task.prompt(), task.expectedOutputContains(), trace.toJsonList(),
+                testOutput, null);
         } catch (Exception e) {
             long latencyMs = System.currentTimeMillis() - start;
-            String detail = e.toString();
-            if (detail.length() > 500) detail = detail.substring(0, 500) + "…";
+            String summary = e.toString();
+            if (summary.length() > 500) summary = summary.substring(0, 500) + "…";
             return new TaskResult(task.id(), task.kind(), false, null, 0, 0, 0.0,
-                latencyMs, "harness error: " + detail);
+                latencyMs, "harness error: " + summary,
+                task.prompt(), task.expectedOutputContains(), List.of(),
+                null, stackTrace(e));
         }
     }
 
-    private static int runTestCommand(Path workdir, String testCommand) throws Exception {
+    /** Full stack trace for the detailed report (the summary stays in {@code detail}). */
+    private static String stackTrace(Exception e) {
+        var sw = new java.io.StringWriter();
+        e.printStackTrace(new java.io.PrintWriter(sw));
+        String s = sw.toString();
+        return s.length() > 8000 ? s.substring(0, 8000) + "…[truncated]" : s;
+    }
+
+    /** Test command outcome: exit code plus captured output. */
+    private record TestOutcome(int exitCode, String output) {}
+
+    private static TestOutcome runTestCommand(Path workdir, String testCommand) throws Exception {
         ProcessBuilder pb = new ProcessBuilder("sh", "-c", testCommand);
         pb.directory(workdir.toFile());
         pb.redirectErrorStream(true);
@@ -121,9 +139,11 @@ public final class BenchRunner {
             p.destroyForcibly();
             throw new BenchException("testCommand timed out: " + testCommand);
         }
-        if (out.length > 0 && System.getenv("AXIOM_BENCH_VERBOSE") != null) {
-            System.out.println(new String(out));
+        String text = new String(out, java.nio.charset.StandardCharsets.UTF_8);
+        if (!text.isBlank() && System.getenv("AXIOM_BENCH_VERBOSE") != null) {
+            System.out.println(text);
         }
-        return p.exitValue();
+        if (text.length() > 4000) text = text.substring(0, 4000) + "…[truncated]";
+        return new TestOutcome(p.exitValue(), text);
     }
 }

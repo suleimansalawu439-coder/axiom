@@ -1,0 +1,156 @@
+{
+  "framework" : "axiom",
+  "frameworkVersion" : "0.5.2",
+  "model" : "fixture",
+  "mode" : "fixture",
+  "timestamp" : "2026-09-25T03:21:57.019038129Z",
+  "notes" : "Deterministic fixture run: scripted model responses, real tool execution. No provider cost.",
+  "results" : [ {
+    "taskId" : "gaia-arithmetic",
+    "kind" : "gaia",
+    "passed" : true,
+    "output" : "396",
+    "promptTokens" : 135,
+    "completionTokens" : 15,
+    "totalTokens" : 150,
+    "costUsd" : 0.0,
+    "latencyMs" : 1200,
+    "detail" : "output contained expected text",
+    "prompt" : "What is 17 * 23 + 5? Reply with just the number.",
+    "expected" : "396",
+    "trace" : [ {
+      "iteration" : 1,
+      "modelText" : "I'll multiply 17 by 23, then add 5.",
+      "toolCalls" : [ {
+        "name" : "bench_multiply",
+        "arguments" : {
+          "x" : 17,
+          "y" : 23
+        },
+        "result" : "391",
+        "durationMs" : 60
+      } ]
+    }, {
+      "iteration" : 2,
+      "modelText" : "396",
+      "toolCalls" : [ ]
+    } ],
+    "testOutput" : null,
+    "error" : null
+  }, {
+    "taskId" : "gaia-two-step",
+    "kind" : "gaia",
+    "passed" : true,
+    "output" : "50",
+    "promptTokens" : 212,
+    "completionTokens" : 29,
+    "totalTokens" : 241,
+    "costUsd" : 0.0,
+    "latencyMs" : 9,
+    "detail" : "output contained expected text",
+    "prompt" : "What is 6 * 7? Then add 8 to your result. Reply with just the final number.",
+    "expected" : "50",
+    "trace" : [ {
+      "iteration" : 1,
+      "modelText" : "I'll multiply 6 by 7 first.",
+      "toolCalls" : [ {
+        "name" : "bench_multiply",
+        "arguments" : {
+          "x" : 6,
+          "y" : 7
+        },
+        "result" : "42",
+        "durationMs" : 2
+      } ]
+    }, {
+      "iteration" : 2,
+      "modelText" : "42. Now I'll add 8.",
+      "toolCalls" : [ {
+        "name" : "bench_add",
+        "arguments" : {
+          "x" : 42,
+          "y" : 8
+        },
+        "result" : "50",
+        "durationMs" : 1
+      } ]
+    }, {
+      "iteration" : 3,
+      "modelText" : "50",
+      "toolCalls" : [ ]
+    } ],
+    "testOutput" : null,
+    "error" : null
+  }, {
+    "taskId" : "gaia-file-lookup",
+    "kind" : "gaia",
+    "passed" : true,
+    "output" : "Abuja",
+    "promptTokens" : 155,
+    "completionTokens" : 17,
+    "totalTokens" : 172,
+    "costUsd" : 0.0,
+    "latencyMs" : 215,
+    "detail" : "output contained expected text",
+    "prompt" : "Read the file 'data.txt' in the workspace and tell me which city is named as the capital. Reply with just the city name.",
+    "expected" : "Abuja",
+    "trace" : [ {
+      "iteration" : 1,
+      "modelText" : "I'll read data.txt to find the capital.",
+      "toolCalls" : [ {
+        "name" : "bench_read_file",
+        "arguments" : {
+          "name" : "data.txt"
+        },
+        "result" : "Nigeria's capital is Abuja, a planned city in the centre of the country.\nIt replaced Lagos as the capital in 1991.\n",
+        "durationMs" : 25
+      } ]
+    }, {
+      "iteration" : 2,
+      "modelText" : "Abuja",
+      "toolCalls" : [ ]
+    } ],
+    "testOutput" : null,
+    "error" : null
+  }, {
+    "taskId" : "swe-fix-greeting",
+    "kind" : "swe",
+    "passed" : true,
+    "output" : "Done",
+    "promptTokens" : 175,
+    "completionTokens" : 24,
+    "totalTokens" : 199,
+    "costUsd" : 0.0,
+    "latencyMs" : 188,
+    "detail" : "testCommand <sh test.sh> exited 0",
+    "prompt" : "The file greet.txt must contain exactly 'Hello, world!'. Use the run tool to fix it, then reply Done.",
+    "expected" : null,
+    "trace" : [ {
+      "iteration" : 1,
+      "modelText" : "I'll fix greet.txt with the run tool.",
+      "toolCalls" : [ {
+        "name" : "run",
+        "arguments" : {
+          "command" : [ "sh", "-c", "printf 'Hello, world!' > greet.txt" ]
+        },
+        "result" : "{\"exitCode\":0,\"stdout\":\"\",\"stderr\":\"\",\"timedOut\":false,\"durationMs\":56}",
+        "durationMs" : 162
+      } ]
+    }, {
+      "iteration" : 2,
+      "modelText" : "Done",
+      "toolCalls" : [ ]
+    } ],
+    "testOutput" : "",
+    "error" : null
+  } ],
+  "totals" : {
+    "tasks" : 4,
+    "passed" : 4,
+    "failed" : 0,
+    "passRate" : 1.0,
+    "totalTokens" : 762,
+    "totalCostUsd" : 0.0,
+    "totalLatencyMs" : 1612
+  }
+}

@@ -19,11 +19,23 @@ import java.util.Map;
 public final class BenchReceipt {
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
-    /** One task's measured outcome. */
+    /**
+     * One task's measured outcome, with the full detail needed to audit it:
+     * the prompt, what was expected, the step-by-step trace, the SWE test
+     * output (when applicable), and the complete error (when the harness
+     * itself failed).
+     */
     public record TaskResult(String taskId, String kind, boolean passed, String output,
                              long promptTokens, long completionTokens, double costUsd,
-                             long latencyMs, String detail) {
+                             long latencyMs, String detail,
+                             String prompt, String expected,
+                             List<Map<String, Object>> trace,
+                             String testOutput, String error) {
         public long totalTokens() { return promptTokens + completionTokens; }
+
+        public TaskResult {
+            trace = trace == null ? List.of() : List.copyOf(trace);
+        }
     }
 
     private final String framework;
@@ -108,6 +120,11 @@ public final class BenchReceipt {
             rm.put("costUsd", r.costUsd());
             rm.put("latencyMs", r.latencyMs());
             rm.put("detail", r.detail());
+            rm.put("prompt", r.prompt());
+            rm.put("expected", r.expected());
+            rm.put("trace", r.trace());
+            rm.put("testOutput", r.testOutput());
+            rm.put("error", r.error());
             rs.add(rm);
         }
         m.put("results", rs);

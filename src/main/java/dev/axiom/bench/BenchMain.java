@@ -2,6 +2,8 @@ package dev.axiom.bench;
 
 import dev.axiom.Axiom;
 import dev.axiom.agent.AgentConfig;
+import dev.axiom.agent.AgentEvent;
+import dev.axiom.agent.AgentResult;
 import dev.axiom.agent.ApprovalHandler;
 import dev.axiom.budget.ModelPrices;
 import dev.axiom.llm.LlmClient;
@@ -19,6 +21,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.function.BiFunction;
 
@@ -27,17 +30,17 @@ import java.util.function.BiFunction;
  *
  * <pre>
  * # Offline / deterministic (default): scripted model fixtures, real tool execution
- * java -cp "target/axiom-0.5.0.jar:lib/*" dev.axiom.bench.BenchMain
+ * java -cp "target/axiom-0.5.2.jar:lib/*" dev.axiom.bench.BenchMain
  *
  * # Live on a free tier: Gemini (free, no card), OpenRouter (:free models),
  * # Groq (free tier), or a local Ollama server — $0 end to end
  * export GEMINI_API_KEY=...   # from https://aistudio.google.com/apikey
  * AXIOM_BENCH_PROVIDER=gemini \
- *   java -cp "target/axiom-0.5.0.jar:lib/*" dev.axiom.bench.BenchMain --live
+ *   java -cp "target/axiom-0.5.2.jar:lib/*" dev.axiom.bench.BenchMain --live
  *
  * # Any other OpenAI-compatible endpoint / paid key:
  * AXIOM_BENCH_PROVIDER=openai AXIOM_BENCH_MODEL=gpt-4o-mini OPENAI_API_KEY=sk-... \
- *   java -cp "target/axiom-0.5.0.jar:lib/*" dev.axiom.bench.BenchMain --live
+ *   java -cp "target/axiom-0.5.2.jar:lib/*" dev.axiom.bench.BenchMain --live
  * </pre>
  *
  * <p>Keys come from environment variables only — never paste a key into chat
@@ -110,8 +113,10 @@ public final class BenchMain {
         LlmClient client = liveClient;
 
         BiFunction<BenchTask, Path, BenchAgent> factory = (task, workdir) -> {
+            List<AgentEvent> events = new ArrayList<>();
             AgentConfig.Builder b = Axiom.agent()
-                .withApprovalHandler(ApprovalHandler.allowAll());
+                .withApprovalHandler(ApprovalHandler.allowAll())
+                .onEvent(events::add);
             if (live) {
                 b.withClient(client);
             } else {
@@ -125,7 +130,20 @@ public final class BenchMain {
                     .build());
                 default -> throw new BenchException("Unknown task: " + task.id());
             }
-            return new Axiom.Agent(b.build())::run;
+            var agent = new Axiom.Agent(b.build());
+            // Anonymous BenchAgent so the runner can read the recorded events
+            // and build the per-task trace for the detailed report.
+            return new BenchAgent() {
+                @Override
+                public AgentResult run(String prompt) {
+                    return agent.run(prompt);
+                }
+
+                @Override
+                public List<AgentEvent> events() {
+                    return List.copyOf(events);
+                }
+            };
         };
 
         long pacingMs = live ? Long.parseLong(System.getenv()
@@ -145,8 +163,20 @@ public final class BenchMain {
             "receipt-" + mode + "-" + stamp + ".json");
         receipt.save(receiptPath);
 
+        // Fully detailed human-readable report next to the machine-readable receipt.
+        Path reportPath = Paths.get("benchmarks", "receipts",
+            "report-" + mode + "-" + stamp + ".md");
+        try {
+            Files.createDirectories(reportPath.toAbsolutePath().getParent());
+            Files.writeString(reportPath, BenchReport.markdown(receipt),
+                java.nio.charset.StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            throw new BenchException("Failed to save benchmark report to " + reportPath, e);
+        }
+
         System.out.println(receipt);
         System.out.println("Receipt: " + receiptPath.toAbsolutePath());
+        System.out.println("Report:  " + reportPath.toAbsolutePath());
     }
 
     // ------------------------------------------------------------------

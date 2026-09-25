@@ -137,6 +137,10 @@ try {
 
 Every LLM call is charged; breaching a limit throws `BudgetExceededException` (carrying the full snapshot). `BudgetUpdated` events fire after every call — even the breaching one — so UIs can render live cost meters. Budgets are thread-safe and shareable across a supervisor team.
 
+## v0.5.5 — what's new
+
+Benchmark speed: parallel task execution, a real rate limiter, and fail-fast on dead quotas. Tasks now run concurrently (configurable via `AXIOM_BENCH_PARALLEL`, `--sequential` to opt out) sharing one token-bucket limiter (`AXIOM_BENCH_RPM`, per-preset defaults) that paces *every LLM call* — across turns and tasks — instead of the old fixed sleep between tasks. Daily/plan quota exhaustion (HTTP 429 with "check your plan and billing") now aborts the run in seconds: no more minutes burned retrying a quota that refills in hours; remaining tasks are recorded as aborted, honestly. Receipts carry `wallClockMs` and `parallelism` so run duration is auditable. On a free tier the floor is the provider's requests/minute; with request headroom (paid key, local model) the 4-task run completes in roughly the slowest task's time.
+
 ## v0.5.4 — what's new
 
 Gemini 3 thought-signature round-trip. Gemini 3 ("thinking") models attach an opaque thought signature to every function call and reject follow-up requests whose replayed calls lack it (HTTP 400). The OpenAI-compatible client now captures the signature off streamed tool-call deltas — Google's `extra_content.google.thought_signature` envelope or the top-level `thoughtSignature` sibling some proxies emit — and replays it verbatim on exactly the call it arrived on (both shapes; never synthesized). Signatures also survive the durable journal and the response cache, so resumed and cached runs replay correctly. Unsigned calls serialize exactly as before.
@@ -361,12 +365,12 @@ GAIA-style and SWE-bench-style runners that record machine-readable receipts —
 
 ```bash
 # Offline / deterministic (default): scripted model fixtures, REAL tool execution
-java -cp "target/axiom-0.5.4.jar:lib/*" dev.axiom.bench.BenchMain
+java -cp "target/axiom-0.5.5.jar:lib/*" dev.axiom.bench.BenchMain
 # -> benchmarks/receipts/receipt-fixture-<timestamp>.json
 
 # Live: against a real model, free or paid
 AXIOM_BENCH_PROVIDER=gemini GEMINI_API_KEY=... \
-  java -cp "target/axiom-0.5.4.jar:lib/*" dev.axiom.bench.BenchMain --live
+  java -cp "target/axiom-0.5.5.jar:lib/*" dev.axiom.bench.BenchMain --live
 # -> benchmarks/receipts/receipt-live-gemini-<timestamp>.json
 ```
 
@@ -417,7 +421,7 @@ If `webSearch`'s signature and its schema ever disagree, the build fails. That's
 No Maven required (a `pom.xml` is included for standard environments):
 
 ```bash
-./build.sh   # compiles, runs all tests, packages target/axiom-0.5.4.jar
+./build.sh   # compiles, runs all tests, packages target/axiom-0.5.5.jar
 ```
 
 Requirements: JDK 21 (auto-detected at `~/workspace/tools/jdk-21`).
@@ -426,7 +430,7 @@ Requirements: JDK 21 (auto-detected at `~/workspace/tools/jdk-21`).
 
 ```bash
 export OPENAI_API_KEY=sk-...
-java -cp "target/axiom-0.5.4.jar:lib/*" dev.axiom.demo.DemoAgent "What is 17*23, and save the answer as a note?"
+java -cp "target/axiom-0.5.5.jar:lib/*" dev.axiom.demo.DemoAgent "What is 17*23, and save the answer as a note?"
 ```
 
 ## Roadmap
@@ -435,6 +439,7 @@ java -cp "target/axiom-0.5.4.jar:lib/*" dev.axiom.demo.DemoAgent "What is 17*23,
 
 ## Status
 
+v0.5.5 — benchmark speed: parallel tasks, token-bucket rate limiting, fail-fast on daily quota exhaustion; receipts record wall-clock time.
 v0.5.4 — Gemini 3 thought-signature round-trip for tool calls (journal + cache aware).
 v0.5.3 — Gemini live preset moved to gemini-3.8-flash (2.0-flash retired by Google); per-run model override via AXIOM_BENCH_MODEL documented.
 v0.5.2 — fully detailed benchmark reports (per-task step-by-step traces in JSON + Markdown report), 194 tests green.

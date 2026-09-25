@@ -46,6 +46,10 @@ public final class BenchReceipt {
     private final List<TaskResult> results;
     /** Honesty disclosure: subset scope, provider tier, cost basis, limits. */
     private final String notes;
+    /** Wall-clock time for the whole run — the number that answers "how long did the benchmark take". */
+    private final long wallClockMs;
+    /** Task parallelism used for the run (1 = sequential). */
+    private final int parallelism;
 
     public BenchReceipt(String framework, String frameworkVersion, String model,
                         String mode, Instant timestamp, List<TaskResult> results) {
@@ -55,6 +59,13 @@ public final class BenchReceipt {
     public BenchReceipt(String framework, String frameworkVersion, String model,
                         String mode, Instant timestamp, List<TaskResult> results,
                         String notes) {
+        this(framework, frameworkVersion, model, mode, timestamp, results, notes,
+            results.stream().mapToLong(TaskResult::latencyMs).sum(), 1);
+    }
+
+    public BenchReceipt(String framework, String frameworkVersion, String model,
+                        String mode, Instant timestamp, List<TaskResult> results,
+                        String notes, long wallClockMs, int parallelism) {
         this.framework = framework;
         this.frameworkVersion = frameworkVersion;
         this.model = model;
@@ -62,6 +73,8 @@ public final class BenchReceipt {
         this.timestamp = timestamp;
         this.results = List.copyOf(results);
         this.notes = notes == null ? "" : notes;
+        this.wallClockMs = wallClockMs;
+        this.parallelism = parallelism;
     }
 
     public String framework() { return framework; }
@@ -72,6 +85,10 @@ public final class BenchReceipt {
     /** Honesty disclosure recorded with the receipt (may be blank). */
     public String notes() { return notes; }
     public List<TaskResult> results() { return results; }
+    /** Wall-clock milliseconds for the whole run (all tasks, all overhead). */
+    public long wallClockMs() { return wallClockMs; }
+    /** Task parallelism used (1 = sequential). */
+    public int parallelism() { return parallelism; }
 
     public int passed() { return (int) results.stream().filter(TaskResult::passed).count(); }
     public int failed() { return results.size() - passed(); }
@@ -106,6 +123,8 @@ public final class BenchReceipt {
         m.put("model", model);
         m.put("mode", mode);
         m.put("timestamp", timestamp.toString());
+        m.put("wallClockMs", wallClockMs);
+        m.put("parallelism", parallelism);
         if (!notes.isBlank()) m.put("notes", notes);
         List<Map<String, Object>> rs = new ArrayList<>();
         for (TaskResult r : results) {
@@ -136,6 +155,7 @@ public final class BenchReceipt {
         totals.put("totalTokens", totalTokens());
         totals.put("totalCostUsd", totalCostUsd());
         totals.put("totalLatencyMs", totalLatencyMs());
+        totals.put("wallClockMs", wallClockMs);
         m.put("totals", totals);
         return m;
     }
@@ -150,9 +170,9 @@ public final class BenchReceipt {
                 r.passed() ? "PASS" : "FAIL", r.taskId(), r.kind(),
                 r.totalTokens(), r.costUsd(), r.latencyMs()));
         }
-        sb.append("Totals: %d/%d passed (%.0f%%), %d tokens, $%.4f, %dms".formatted(
+        sb.append("Totals: %d/%d passed (%.0f%%), %d tokens, $%.4f, %dms wall clock (%dms task time summed, parallelism=%d)".formatted(
             passed(), results.size(), passRate() * 100, totalTokens(), totalCostUsd(),
-            totalLatencyMs()));
+            wallClockMs, totalLatencyMs(), parallelism));
         if (!notes.isBlank()) sb.append("%nNotes: %s".formatted(notes));
         return sb.toString();
     }

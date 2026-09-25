@@ -9,6 +9,10 @@ import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BiFunction;
 
@@ -39,7 +43,7 @@ public final class BenchRunner {
     }
 
     /**
-     * Full run with pacing and receipt notes.
+     * Full run with pacing and receipt notes (legacy sequential behavior).
      *
      * @param pacingMs pause between tasks (never before the first), so
      *                 free-tier rate limits are respected instead of tripped
@@ -50,9 +54,43 @@ public final class BenchRunner {
                                    BiFunction<BenchTask, Path, BenchAgent> agentFactory,
                                    ModelPrices prices, String model, String mode,
                                    long pacingMs, String notes) {
+        return run(tasks, agentFactory, prices, model, mode, pacingMs, notes,
+            BenchRunConfig.sequential());
+    }
+
+    /**
+     * Full run under an explicit execution config: task parallelism, a
+     * shared request rate limiter, and the daily-quota fail-fast policy.
+     * The receipt records wall-clock time and the parallelism used, so the
+     * "how long did the benchmark take" question is answered honestly.
+     *
+     * @param pacingMs honored only when {@code config.parallelism() == 1}
+     *                 (legacy sequential pacing); parallel runs pace via the
+     *                 config's rate limiter instead
+     */
+    public static BenchReceipt run(List<BenchTask> tasks,
+                                   BiFunction<BenchTask, Path, BenchAgent> agentFactory,
+                                   ModelPrices prices, String model, String mode,
+                                   long pacingMs, String notes, BenchRunConfig config) {
+        long wallStart = System.currentTimeMillis();
+        List<TaskResult> results = config.parallelism() <= 1
+            ? runSequential(tasks, agentFactory, prices, model, pacingMs, config)
+            : runParallel(tasks, agentFactory, prices, model, config);
+        long wallClockMs = System.currentTimeMillis() - wallStart;
+        return new BenchReceipt("axiom", Version.CURRENT, model, mode,
+            Instant.now(), results, notes == null ? "" : notes,
+            wallClockMs, config.parallelism());
+    }
+
+    /** One task at a time, in order, with optional pacing between tasks. */
+    private static List<TaskResult> runSequential(List<BenchTask> tasks,
+                                                  BiFunction<BenchTask, Path, BenchAgent> agentFactory,
+                                                  ModelPrices prices, String model,
+                                                  long pacingMs, BenchRunConfig config) {
         List<TaskResult> results = new ArrayList<>();
         boolean first = true;
-        for (BenchTask task : tasks) {
+        for (int i = 0; i < tasks.size(); i++) {
+            BenchTask task = tasks.get(i);
             if (!first && pacingMs > 0) {
                 try {
                     Thread.sleep(pacingMs);
@@ -62,10 +100,86 @@ public final class BenchRunner {
                 }
             }
             first = false;
-            results.add(runOne(task, agentFactory, prices, model));
+            try {
+                results.add(runOne(task, agentFactory, prices, model));
+            } catch (QuotaExhaustedException qe) {
+                if (!config.failFastOnQuota()) throw qe;
+                results.add(quotaResult(task, qe));
+                for (int j = i + 1; j < tasks.size(); j++) {
+                    results.add(abortedResult(tasks.get(j)));
+                }
+                break;
+            }
         }
-        return new BenchReceipt("axiom", Version.CURRENT, model, mode,
-            Instant.now(), results, notes == null ? "" : notes);
+        return results;
+    }
+
+    /**
+     * Tasks run concurrently in a fixed pool; results are collected in task
+     * order so receipts stay comparable across runs. On daily-quota
+     * exhaustion the remaining tasks are cancelled and recorded as aborted
+     * instead of each failing the same way.
+     */
+    private static List<TaskResult> runParallel(List<BenchTask> tasks,
+                                                BiFunction<BenchTask, Path, BenchAgent> agentFactory,
+                                                ModelPrices prices, String model,
+                                                BenchRunConfig config) {
+        ExecutorService pool = Executors.newFixedThreadPool(config.parallelism());
+        try {
+            List<Future<TaskResult>> futures = new ArrayList<>();
+            for (BenchTask task : tasks) {
+                futures.add(pool.submit(() -> runOne(task, agentFactory, prices, model)));
+            }
+            List<TaskResult> results = new ArrayList<>();
+            for (int i = 0; i < futures.size(); i++) {
+                try {
+                    results.add(futures.get(i).get());
+                } catch (ExecutionException ee) {
+                    if (ee.getCause() instanceof QuotaExhaustedException qe
+                        && config.failFastOnQuota()) {
+                        results.add(quotaResult(tasks.get(i), qe));
+                        for (int j = i + 1; j < futures.size(); j++) {
+                            futures.get(j).cancel(true);
+                        }
+                        for (int j = i + 1; j < tasks.size(); j++) {
+                            results.add(abortedResult(tasks.get(j)));
+                        }
+                        break;
+                    }
+                    throw new BenchException("Benchmark task failed unexpectedly", ee.getCause());
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    for (Future<TaskResult> f : futures) f.cancel(true);
+                    throw new BenchException("Benchmark run interrupted", ie);
+                }
+            }
+            return results;
+        } finally {
+            pool.shutdownNow();
+            try {
+                pool.awaitTermination(30, TimeUnit.SECONDS);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+            }
+        }
+    }
+
+    /** The quota-hit task's own result: failed, with the cause recorded. */
+    private static TaskResult quotaResult(BenchTask task, QuotaExhaustedException qe) {
+        String summary = qe.getCause() == null ? qe.toString() : qe.getCause().toString();
+        if (summary.length() > 500) summary = summary.substring(0, 500) + "…";
+        return new TaskResult(task.id(), task.kind(), false, null, 0, 0, 0.0,
+            0, "daily quota exhausted, run aborted: " + summary,
+            task.prompt(), task.expectedOutputContains(), List.of(),
+            null, stackTrace(qe));
+    }
+
+    /** A task that never ran because a sibling exhausted the daily quota. */
+    private static TaskResult abortedResult(BenchTask task) {
+        return new TaskResult(task.id(), task.kind(), false, null, 0, 0, 0.0,
+            0, "aborted: not started — sibling task exhausted the provider's daily quota",
+            task.prompt(), task.expectedOutputContains(), List.of(),
+            null, null);
     }
 
     private static TaskResult runOne(BenchTask task,
@@ -106,6 +220,12 @@ public final class BenchRunner {
                 task.prompt(), task.expectedOutputContains(), trace.toJsonList(),
                 testOutput, null);
         } catch (Exception e) {
+            // Daily/plan quota exhaustion is unrecoverable within a run:
+            // propagate so the runner can abort siblings immediately
+            // instead of letting every task fail the same slow way.
+            if (dev.axiom.llm.LlmException.isQuotaExhausted(e)) {
+                throw new QuotaExhaustedException(task.id(), e);
+            }
             long latencyMs = System.currentTimeMillis() - start;
             String summary = e.toString();
             if (summary.length() > 500) summary = summary.substring(0, 500) + "…";

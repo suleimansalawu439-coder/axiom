@@ -41,6 +41,11 @@ import java.util.function.BiFunction;
  * # Any other OpenAI-compatible endpoint / paid key:
  * AXIOM_BENCH_PROVIDER=openai AXIOM_BENCH_MODEL=gpt-4o-mini OPENAI_API_KEY=sk-... \
  *   java -cp "target/axiom-0.5.2.jar:lib/*" dev.axiom.bench.BenchMain --live
+ *
+ * # Speed knobs (live runs default to parallel tasks):
+ * #   AXIOM_BENCH_PARALLEL=4   tasks running concurrently (default: task count)
+ * #   AXIOM_BENCH_RPM=5        shared requests/minute across all tasks (default: preset)
+ * #   --sequential             one task at a time (overrides AXIOM_BENCH_PARALLEL)
  * </pre>
  *
  * <p>Keys come from environment variables only — never paste a key into chat
@@ -90,6 +95,8 @@ public final class BenchMain {
 
         LlmClient liveClient = null;
         String apiKey = null;
+        BenchRunConfig runConfig = BenchRunConfig.sequential();
+        double rpm = 0;
         if (live) {
             if (preset.needsKey()) {
                 apiKey = System.getenv(preset.apiKeyEnv());
@@ -103,12 +110,26 @@ public final class BenchMain {
                     System.exit(2);
                 }
             }
-            liveClient = new RetryingLlmClient(
+            var retrying = new RetryingLlmClient(
                 new OpenAiCompatibleClient(preset.baseUrl(), apiKey == null ? "" : apiKey, model),
                 RetryPolicy.builder()
                     .maxAttempts(6)
                     .initialBackoff(Duration.ofSeconds(2))
                     .build());
+            // Parallel tasks sharing one token bucket: wall clock becomes the
+            // slowest task, not the sum. The limiter sits OUTSIDE the retry
+            // decorator so retries also draw permits and can't trip the
+            // per-minute limit they exist to respect.
+            boolean sequential = List.of(args).contains("--sequential");
+            rpm = Double.parseDouble(System.getenv().getOrDefault("AXIOM_BENCH_RPM",
+                String.valueOf(preset.defaultRpm())));
+            int parallelism = Integer.parseInt(System.getenv().getOrDefault("AXIOM_BENCH_PARALLEL",
+                sequential ? "1" : String.valueOf(tasks().size())));
+            RateLimiter limiter = rpm > 0 ? new RateLimiter(rpm, parallelism) : null;
+            liveClient = limiter != null ? new RateLimitedLlmClient(retrying, limiter) : retrying;
+            runConfig = new BenchRunConfig(parallelism, limiter, true);
+        } else {
+            runConfig = new BenchRunConfig(tasks().size(), null, true);
         }
         LlmClient client = liveClient;
 
@@ -146,16 +167,18 @@ public final class BenchMain {
             };
         };
 
-        long pacingMs = live ? Long.parseLong(System.getenv()
-            .getOrDefault("AXIOM_BENCH_DELAY_MS", String.valueOf(preset.defaultPacingMs()))) : 0;
+        long pacingMs = 0; // legacy sequential pacing; parallel runs pace via the rate limiter
+        String rpmDesc = rpm > 0 ? rpm + " RPM" : "unlimited";
         String notes = live
             ? ("Representative 4-task subset (3 GAIA-style + 1 SWE-bench-style), not the full "
                 + "GAIA/SWE-bench suites. Provider: " + preset.id() + " (" + preset.keySignup() + "). "
-                + "Rate-limited with " + pacingMs + "ms pacing between tasks; HTTP 429 retried "
-                + "with Retry-After honored. Cost basis: provider free tier ($0).")
+                + "Parallelism=" + runConfig.parallelism() + "; shared token-bucket rate limiter at "
+                + rpmDesc + " across all tasks and turns; per-minute HTTP 429 retried with "
+                + "Retry-After honored; daily/plan quota exhaustion aborts the run immediately "
+                + "instead of retrying a dead quota. Cost basis: provider free tier ($0).")
             : "Deterministic fixture run: scripted model responses, real tool execution. No provider cost.";
         BenchReceipt receipt = BenchRunner.run(tasks(), factory,
-            ModelPrices.defaults(), model, mode, pacingMs, notes);
+            ModelPrices.defaults(), model, mode, pacingMs, notes, runConfig);
 
         String stamp = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss")
             .withZone(ZoneOffset.UTC).format(Instant.now());

@@ -14,8 +14,14 @@ import java.util.List;
 public final class BenchProvider {
 
     /** One runnable provider: endpoint, key source, sensible free default model. */
+    /**
+     * Provider preset. {@code defaultRpm} is the sane starting requests/minute
+     * for the shared benchmark rate limiter (0 = unlimited) — a starting
+     * point, not a verified provider limit; override with AXIOM_BENCH_RPM.
+     */
     public record Preset(String id, String baseUrl, String apiKeyEnv,
-                         String defaultModel, long defaultPacingMs, String keySignup) {
+                         String defaultModel, long defaultPacingMs, double defaultRpm,
+                         String keySignup) {
         /** True when this preset needs an API key to run. */
         public boolean needsKey() { return apiKeyEnv != null && !apiKeyEnv.isBlank(); }
     }
@@ -23,23 +29,23 @@ public final class BenchProvider {
     public static final List<Preset> PRESETS = List.of(
         new Preset("gemini",
             "https://generativelanguage.googleapis.com/v1beta/openai",
-            "GEMINI_API_KEY", "gemini-3.8-flash", 4_000,
+            "GEMINI_API_KEY", "gemini-3.8-flash", 4_000, 5,
             "https://aistudio.google.com/apikey — free tier, no card required"),
         new Preset("openrouter",
             "https://openrouter.ai/api/v1",
-            "OPENROUTER_API_KEY", "meta-llama/llama-3.3-70b-instruct:free", 3_000,
+            "OPENROUTER_API_KEY", "meta-llama/llama-3.3-70b-instruct:free", 3_000, 20,
             "https://openrouter.ai/keys — free models have ids ending in :free"),
         new Preset("groq",
             "https://api.groq.com/openai/v1",
-            "GROQ_API_KEY", "llama-3.3-70b-versatile", 3_000,
+            "GROQ_API_KEY", "llama-3.3-70b-versatile", 3_000, 30,
             "https://console.groq.com/keys — free tier, no card required"),
         new Preset("ollama",
             "http://localhost:11434/v1",
-            "", "llama3.1", 0,
+            "", "llama3.1", 0, 0,
             "local model server — no key; install from https://ollama.com then `ollama pull llama3.1`"),
         new Preset("openai",
             "https://api.openai.com/v1",
-            "OPENAI_API_KEY", "gpt-4o-mini", 1_000,
+            "OPENAI_API_KEY", "gpt-4o-mini", 1_000, 60,
             "https://platform.openai.com/api-keys — paid")
     );
 

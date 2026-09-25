@@ -71,6 +71,11 @@ public final class RetryingLlmClient implements StreamingLlmClient {
             try {
                 return delegate.chat(messages, tools, options);
             } catch (Exception e) {
+                // Daily/plan quota exhaustion never recovers within a run —
+                // fail fast instead of burning minutes on doomed retries.
+                if (LlmException.isQuotaExhausted(e)) {
+                    throw e instanceof RuntimeException re ? re : new LlmException(e.getMessage(), e);
+                }
                 if (!policy.shouldRetry(e, attempt)) {
                     throw e instanceof RuntimeException re ? re : new LlmException(e.getMessage(), e);
                 }
@@ -103,6 +108,10 @@ public final class RetryingLlmClient implements StreamingLlmClient {
                 return response;
             } catch (Exception e) {
                 // buffered tokens are dropped here — the next attempt starts clean.
+                // Daily/plan quota exhaustion never recovers within a run — fail fast.
+                if (LlmException.isQuotaExhausted(e)) {
+                    throw e instanceof RuntimeException re ? re : new LlmException(e.getMessage(), e);
+                }
                 if (!policy.shouldRetry(e, attempt)) {
                     throw e instanceof RuntimeException re ? re : new LlmException(e.getMessage(), e);
                 }

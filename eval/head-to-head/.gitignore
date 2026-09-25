@@ -1,0 +1,5 @@
+# Evaluation-only artifacts: reproducible via fetch-deps.sh + run.sh, not committed.
+lib/
+sources/
+out/
+axiom-classes/

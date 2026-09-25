@@ -1,0 +1,102 @@
+==================================================================
+SCENARIO (a) — duplicate tool names
+------------------------------------------------------------------
+--- Axiom: compile fixture with ToolProcessor (javac -proc:only) ---
+fixtures/axiom/DuplicateTools.java:17: error: [Axiom] @Tool name 'calculate' is already used by DuplicateTools. Tool names must be unique across the compilation ? the runtime registry is keyed by name.
+    public int calculate(@ToolParam(description = "the number") int x,
+               ^
+Note: [Axiom] Axiom: generated META-INF/axiom/tools/DuplicateTools.json
+Note: [Axiom] Axiom: generated META-INF/axiom/policy/DuplicateTools.json
+1 error
+(javac exit code: 1)
+
+--- LangChain4j: duplicate @Tool names at wiring time ---
+[main] WARN dev.langchain4j.agent.tool.ToolSpecifications - Parameter 'arg0' of tool method 'ScenarioA_Lc4j$DupTools.calculate' has no name available at runtime, so the LLM will see it as 'arg0'. Meaningless parameter names degrade tool calling accuracy. Either compile with the '-parameters' javac flag (<maven.compiler.parameters>true</maven.compiler.parameters>, or kotlinOptions.javaParameters=true), or name the parameter explicitly with @P(name = "...").
+[LC4J] RESULT: thrown after 833 ms
+[LC4J] exception: dev.langchain4j.service.IllegalConfigurationException
+[LC4J] message: Duplicated definition for tool: calculate
+[LC4J] thrown-from: dev.langchain4j.service.tool.ToolService.addTools(ToolService.java:592)
+
+==================================================================
+SCENARIO (e)+(f) — LangChain4j 1.20.0 vs mock OpenAI server
+------------------------------------------------------------------
+[mock] accept from /127.0.0.1:44364 mode=sse-garbage
+[mock] responded 200 (186 bytes) to /127.0.0.1:44364
+[LC4J] (e) garbage SSE -> ERROR: java.lang.RuntimeException: com.fasterxml.jackson.core.JsonParseException: Unrecognized token 'THIS': was expecting (JSON String, Number, Array, Object or token 'null', 'true' or 'false') | partial content delivered before failure: 'hello' | HTTP attempts: 1
+[mock] accept from /127.0.0.1:35862 mode=429-quota
+[mock] responded 429 (111 bytes) to /127.0.0.1:35862
+[main] WARN dev.langchain4j.internal.RetryUtils - A retriable exception occurred. Remaining retries: 2 of 2
+dev.langchain4j.exception.RateLimitException: {"error":{"message":"You exceeded your current quota, please check your plan and billing details.","code":429}}
+	at dev.langchain4j.internal.ExceptionMapper$DefaultExceptionMapper.mapHttpStatusCode(ExceptionMapper.java:68)
+	at dev.langchain4j.internal.ExceptionMapper$DefaultExceptionMapper.mapException(ExceptionMapper.java:44)
+	at dev.langchain4j.internal.ExceptionMapper.withExceptionMapper(ExceptionMapper.java:31)
+	at dev.langchain4j.internal.RetryUtils.lambda$withRetryMappingExceptions$1(RetryUtils.java:405)
+	at dev.langchain4j.internal.RetryUtils$RetryPolicy.withRetry(RetryUtils.java:213)
+	at dev.langchain4j.internal.RetryUtils.withRetry(RetryUtils.java:342)
+	at dev.langchain4j.internal.RetryUtils.withRetryMappingExceptions(RetryUtils.java:405)
+	at dev.langchain4j.internal.RetryUtils.withRetryMappingExceptions(RetryUtils.java:388)
+	at dev.langchain4j.model.openai.OpenAiChatModel.doChat(OpenAiChatModel.java:169)
+	at dev.langchain4j.model.chat.ChatModel.chat(ChatModel.java:68)
+	at dev.langchain4j.model.chat.ChatModel.chat(ChatModel.java:43)
+	at ScenarioEF_Lc4j.runScenarios(ScenarioEF_Lc4j.java:80)
+	at ScenarioEF_Lc4j.main(ScenarioEF_Lc4j.java:30)
+Caused by: dev.langchain4j.exception.HttpException: {"error":{"message":"You exceeded your current quota, please check your plan and billing details.","code":429}}
+	at dev.langchain4j.http.client.jdk.JdkHttpClient.execute(JdkHttpClient.java:77)
+	at dev.langchain4j.model.openai.internal.SyncRequestExecutor.execute(SyncRequestExecutor.java:31)
+	at dev.langchain4j.model.openai.internal.RequestExecutor.executeRaw(RequestExecutor.java:65)
+	at dev.langchain4j.model.openai.OpenAiChatModel.lambda$doChat$0(OpenAiChatModel.java:170)
+	at dev.langchain4j.internal.ExceptionMapper.withExceptionMapper(ExceptionMapper.java:29)
+	... 10 more
+[mock] accept from /127.0.0.1:35864 mode=429-quota
+[mock] responded 429 (111 bytes) to /127.0.0.1:35864
+[main] WARN dev.langchain4j.internal.RetryUtils - A retriable exception occurred. Remaining retries: 1 of 2
+dev.langchain4j.exception.RateLimitException: {"error":{"message":"You exceeded your current quota, please check your plan and billing details.","code":429}}
+	at dev.langchain4j.internal.ExceptionMapper$DefaultExceptionMapper.mapHttpStatusCode(ExceptionMapper.java:68)
+	at dev.langchain4j.internal.ExceptionMapper$DefaultExceptionMapper.mapException(ExceptionMapper.java:44)
+	at dev.langchain4j.internal.ExceptionMapper.withExceptionMapper(ExceptionMapper.java:31)
+	at dev.langchain4j.internal.RetryUtils.lambda$withRetryMappingExceptions$1(RetryUtils.java:405)
+	at dev.langchain4j.internal.RetryUtils$RetryPolicy.withRetry(RetryUtils.java:213)
+	at dev.langchain4j.internal.RetryUtils.withRetry(RetryUtils.java:342)
+	at dev.langchain4j.internal.RetryUtils.withRetryMappingExceptions(RetryUtils.java:405)
+	at dev.langchain4j.internal.RetryUtils.withRetryMappingExceptions(RetryUtils.java:388)
+	at dev.langchain4j.model.openai.OpenAiChatModel.doChat(OpenAiChatModel.java:169)
+	at dev.langchain4j.model.chat.ChatModel.chat(ChatModel.java:68)
+	at dev.langchain4j.model.chat.ChatModel.chat(ChatModel.java:43)
+	at ScenarioEF_Lc4j.runScenarios(ScenarioEF_Lc4j.java:80)
+	at ScenarioEF_Lc4j.main(ScenarioEF_Lc4j.java:30)
+Caused by: dev.langchain4j.exception.HttpException: {"error":{"message":"You exceeded your current quota, please check your plan and billing details.","code":429}}
+	at dev.langchain4j.http.client.jdk.JdkHttpClient.execute(JdkHttpClient.java:77)
+	at dev.langchain4j.model.openai.internal.SyncRequestExecutor.execute(SyncRequestExecutor.java:31)
+	at dev.langchain4j.model.openai.internal.RequestExecutor.executeRaw(RequestExecutor.java:65)
+	at dev.langchain4j.model.openai.OpenAiChatModel.lambda$doChat$0(OpenAiChatModel.java:170)
+	at dev.langchain4j.internal.ExceptionMapper.withExceptionMapper(ExceptionMapper.java:29)
+	... 10 more
+[mock] accept from /127.0.0.1:35874 mode=429-quota
+[mock] responded 429 (111 bytes) to /127.0.0.1:35874
+[LC4J] (f) 429+Retry-After:30 -> dev.langchain4j.exception.RateLimitException: {"error":{"message":"You exceeded your current quota, please check your plan and billing details.","code":429}}
+[LC4J] (f) elapsed 1359 ms over 3 HTTP attempts; Retry-After:30 honored? NO
+
+==================================================================
+SCENARIO (e)+(f) — Axiom vs mock OpenAI server
+------------------------------------------------------------------
+[mock] accept from /127.0.0.1:57906 mode=sse-garbage
+[mock] responded 200 (186 bytes) to /127.0.0.1:57906
+[mock] accept from /127.0.0.1:40148 mode=sse-garbage
+[mock] responded 200 (186 bytes) to /127.0.0.1:40148
+[mock] accept from /127.0.0.1:40164 mode=sse-garbage
+[mock] responded 200 (186 bytes) to /127.0.0.1:40164
+[mock] accept from /127.0.0.1:55866 mode=sse-garbage
+[mock] responded 200 (186 bytes) to /127.0.0.1:55866
+[AXIOM] (e) garbage SSE -> ERROR: dev.axiom.llm.LlmException: LLM streaming request failed: Unrecognized token 'THIS': was expecting (JSON String, Number, Array, Object or token 'null', 'true' or 'false') | partial content delivered before failure: '' | HTTP attempts: 4
+[mock] accept from /127.0.0.1:46368 mode=429-quota
+[mock] responded 429 (111 bytes) to /127.0.0.1:46368
+[AXIOM] (f1) quota-429 -> dev.axiom.llm.LlmException: LLM request failed with HTTP 429: {"error":{"message":"You exceeded your current quota, please check your plan and billing details.","code":429}}
+[AXIOM] (f1) isQuotaExhausted=true, HTTP attempts=1, elapsed=24 ms
+[mock] accept from /127.0.0.1:56884 mode=429-once-then-ok
+[mock] responded 429 (65 bytes) to /127.0.0.1:56884
+[mock] accept from /127.0.0.1:56900 mode=429-once-then-ok
+[mock] responded 200 (221 bytes) to /127.0.0.1:56900
+[AXIOM] (f2) rate-429+Retry-After:2 -> SUCCESS after 2026 ms, 2 attempts, content='ok' (Retry-After honored? YES)
+
+==================================================================
+DONE

@@ -204,6 +204,71 @@ public final class ReActAgent {
     }
 
     /**
+     * Continue a run from an already-established conversation prefix — the
+     * primitive behind replay forks ({@code dev.axiom.replay}).
+     *
+     * <p>{@code prefixMessages} is the full message list as of just before
+     * turn {@code completedIterations + 1}; {@code pendingResponse} is the
+     * model response for that turn, already obtained (recorded, scripted,
+     * or otherwise supplied — it is <b>never</b> fetched from the LLM here).
+     * It is journaled as an {@code LlmResponse} like any model turn; callers
+     * record lineage (fork-of, scripted) in {@code lineage}, merged into the
+     * {@code run_started} config.
+     *
+     * <p>From the following turn on, the loop runs normally against
+     * {@code config.client()} with real tool dispatch, guardrails, approvals,
+     * and the side-effect ledger — all recorded in a fresh journal, so the
+     * original run's journal is never touched.
+     *
+     * <p>Deliberate differences from {@link #run}: input guardrails are not
+     * re-applied (the task was screened in the original run — pass the
+     * recorded, screened task), and conversation memory is not persisted
+     * (a hypothetical branch must not pollute the user's memory store).
+     */
+    public AgentResult runFromState(String task, List<ChatMessage> prefixMessages,
+                                    int completedIterations,
+                                    ChatResponse.TokenUsage usageSoFar,
+                                    int toolCallsMadeSoFar,
+                                    ChatResponse pendingResponse,
+                                    Map<String, Object> lineage) {
+        if (pendingResponse == null) {
+            throw new IllegalArgumentException("pendingResponse is required");
+        }
+        List<ChatMessage> messages = new ArrayList<>(prefixMessages);
+        if (config.journalRoot() != null) {
+            journal = RunJournal.create(config.journalRoot());
+            Map<String, Object> snap = configSnapshot();
+            if (lineage != null) snap.putAll(lineage);
+            journal.appendRunStarted(task, snap);
+        }
+        emit(new AgentEvent.RunStarted(Instant.now(), task));
+
+        int iteration = completedIterations + 1;
+        emit(new AgentEvent.LlmRequest(Instant.now(), iteration));
+        emit(new AgentEvent.LlmResponse(Instant.now(), iteration, pendingResponse));
+        ChatResponse.TokenUsage totalUsage = usageSoFar.add(pendingResponse.usage());
+        chargeBudget(pendingResponse.usage());
+
+        int toolCallsMade = toolCallsMadeSoFar;
+        if (!pendingResponse.hasToolCalls()) {
+            String answer = applyOutputGuardrails(pendingResponse.content());
+            AgentResult result = new AgentResult(
+                answer, iteration, toolCallsMade, totalUsage, true);
+            emit(new AgentEvent.RunFinished(Instant.now(), result));
+            messages.add(ChatMessage.assistant(answer));
+            return result;
+        }
+        messages.add(ChatMessage.assistantWithToolCalls(
+            pendingResponse.content(), pendingResponse.toolCalls()));
+        for (ToolCallRequest call : pendingResponse.toolCalls()) {
+            toolCallsMade++;
+            String observation = executeToolCall(call, config.tools(), Map.of());
+            messages.add(ChatMessage.toolResult(call.id(), call.name(), observation));
+        }
+        return runLoop(new LoopState(messages, iteration, totalUsage, toolCallsMade, Map.of()));
+    }
+
+    /**
      * Replay a journal into a transcript without emitting events or executing
      * anything. Public so {@link dev.axiom.durable.AgentRun} can resume typed
      * runs (replay the transcript, then run the formatting step).

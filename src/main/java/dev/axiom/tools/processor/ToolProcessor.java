@@ -1,5 +1,8 @@
 package dev.axiom.tools.processor;
 
+import dev.axiom.capabilities.Capability;
+import dev.axiom.capabilities.Ensures;
+import dev.axiom.capabilities.Requires;
 import dev.axiom.tools.Tool;
 import dev.axiom.tools.ToolParam;
 
@@ -14,6 +17,7 @@ import javax.tools.FileObject;
 import javax.tools.StandardLocation;
 import java.io.IOException;
 import java.io.Writer;
+import java.lang.annotation.Annotation;
 import java.util.*;
 
 /**
@@ -48,6 +52,19 @@ public class ToolProcessor extends AbstractProcessor {
     private final Map<String, String> toolNames = new LinkedHashMap<>();
 
     /**
+     * Capability policy state, accumulated across rounds for the
+     * end-of-compilation satisfiability check ("no dead policies").
+     */
+    /** Tool name -> required session tokens. */
+    private final Map<String, Set<Capability>> requiresByTool = new LinkedHashMap<>();
+    /** Tool name -> the method element, for error blame. */
+    private final Map<String, Element> toolElements = new LinkedHashMap<>();
+    /** Session token -> tool names that @Ensures it. */
+    private final Map<Capability, Set<String>> ensuredByToken = new LinkedHashMap<>();
+    /** Policy resources already written this compilation (one per holder). */
+    private final Set<String> writtenPolicyResources = new HashSet<>();
+
+    /**
      * JDK types Jackson handles natively without bean introspection, so they
      * need no constructor/record/@JsonCreator check.
      */
@@ -61,6 +78,7 @@ public class ToolProcessor extends AbstractProcessor {
     @Override
     public boolean process(Set<? extends TypeElement> annotations, RoundEnvironment roundEnv) {
         Map<String, List<String>> schemasByClass = new LinkedHashMap<>();
+        Map<String, List<String>> policiesByClass = new LinkedHashMap<>();
 
         for (Element element : roundEnv.getElementsAnnotatedWith(Tool.class)) {
             if (element.getKind() != ElementKind.METHOD) {
@@ -126,6 +144,28 @@ public class ToolProcessor extends AbstractProcessor {
                 "parameters", schema,
                 "idempotent", tool.idempotent());
 
+            // Capability policy: @Requires/@Ensures declare STRIPS-style
+            // preconditions/effects over session tokens; @Tool(capabilities)
+            // declares effect capabilities. Validated here, emitted to the
+            // runtime policy artifact, and satisfiability-checked at the end
+            // of the compilation ("no dead policies").
+            Set<Capability> requires = validateTokens(
+                method.getAnnotation(Requires.class), method, toolName, "@Requires");
+            Set<Capability> ensures = validateTokens(
+                method.getAnnotation(Ensures.class), method, toolName, "@Ensures");
+            requiresByTool.put(toolName, requires);
+            toolElements.putIfAbsent(toolName, method);
+            for (Capability token : ensures) {
+                ensuredByToken.computeIfAbsent(token, k -> new LinkedHashSet<>()).add(toolName);
+            }
+            Map<String, Object> policyEntry = new LinkedHashMap<>();
+            policyEntry.put("name", toolName);
+            policyEntry.put("capabilities", namesOf(Arrays.asList(tool.capabilities())));
+            policyEntry.put("requires", namesOf(requires));
+            policyEntry.put("ensures", namesOf(ensures));
+            policiesByClass.computeIfAbsent(holderClass, k -> new ArrayList<>())
+                .add(toJson(policyEntry));
+
             // Return types are serialized to observations via Jackson: a
             // provably undeserializable/unserializable declared type fails the
             // build instead of producing garbage observations at runtime.
@@ -141,7 +181,106 @@ public class ToolProcessor extends AbstractProcessor {
         for (var entry : schemasByClass.entrySet()) {
             writeSchemaResource(entry.getKey(), entry.getValue());
         }
+        for (var entry : policiesByClass.entrySet()) {
+            writePolicyResource(entry.getKey(), entry.getValue());
+        }
+        if (roundEnv.processingOver()) {
+            checkPolicySatisfiability();
+        }
         return true;
+    }
+
+    // ------------------------------------------------------------------
+    // Capability policy
+    // ------------------------------------------------------------------
+
+    /**
+     * Validate a {@code @Requires}/{@code @Ensures} annotation: every member
+     * must be a session token, not an effect capability. Effect capabilities
+     * belong on {@code @Tool(capabilities = …)}; tokens are session facts.
+     * Mixing them is almost always an authoring mistake, so it fails the
+     * build rather than silently meaning nothing at runtime.
+     */
+    private Set<Capability> validateTokens(Annotation annotation, Element method,
+                                           String toolName, String annotationName) {
+        Set<Capability> tokens = new LinkedHashSet<>();
+        if (annotation == null) return tokens;
+        Capability[] declared = annotationName.equals("@Requires")
+            ? ((Requires) annotation).value() : ((Ensures) annotation).value();
+        for (Capability c : declared) {
+            if (!c.isSessionToken()) {
+                error(method, ("%s on @Tool '%s' references %s, which is an effect "
+                    + "capability, not a session token. %s/@Ensures accept only session "
+                    + "tokens (APPROVAL, BACKUP) — declare effects with "
+                    + "@Tool(capabilities = …).").formatted(
+                        annotationName, toolName, c, annotationName));
+                continue;
+            }
+            tokens.add(c);
+        }
+        return tokens;
+    }
+
+    private static List<String> namesOf(Collection<Capability> caps) {
+        List<String> names = new ArrayList<>(caps.size());
+        for (Capability c : caps) names.add(c.name());
+        return names;
+    }
+
+    /**
+     * "No dead policies": every required session token must be ensurable by
+     * some {@code @Tool} in this compilation. A tool whose precondition can
+     * never be satisfied could never run — that is a policy authoring bug,
+     * and it fails the build here instead of surfacing as a mysterious
+     * runtime block at 2am.
+     *
+     * <p>Boundary, stated plainly: this sees one compilation. Tools from
+     * already-compiled jars (or MCP-discovered at runtime) are invisible to
+     * it — the runtime {@code CapabilityGuardrail} still enforces their
+     * preconditions, fail-closed.
+     */
+    private void checkPolicySatisfiability() {
+        for (var entry : requiresByTool.entrySet()) {
+            String toolName = entry.getKey();
+            for (Capability token : entry.getValue()) {
+                Set<String> ensurers =
+                    ensuredByToken.getOrDefault(token, Set.of());
+                if (ensurers.isEmpty()) {
+                    error(toolElements.get(toolName),
+                        ("Policy unsatisfiable: tool '%s' requires session token %s, "
+                            + "but no @Tool in this compilation ensures it. The tool could "
+                            + "never run — either add a tool with @Ensures(%s) (e.g. a backup "
+                            + "tool) or drop the @Requires.").formatted(
+                                toolName, token, token));
+                } else if (ensurers.size() == 1 && ensurers.contains(toolName)) {
+                    processingEnv.getMessager().printMessage(Diagnostic.Kind.WARNING,
+                        ("[Axiom] Tool '%s' is the only ensurer of session token %s, which "
+                            + "it also requires — it can never establish its own precondition "
+                            + "and so can never run.").formatted(toolName, token),
+                        toolElements.get(toolName));
+                }
+            }
+        }
+    }
+
+    private void writePolicyResource(String className, List<String> toolEntries) {
+        // Same binary-name scheme as the tool schemas:
+        // META-INF/axiom/policy/dev/axiom/bench/BenchMain$CalcTools.json
+        String resource = "META-INF/axiom/policy/" + className.replace('.', '/') + ".json";
+        if (!writtenPolicyResources.add(resource)) return; // one write per compilation
+        String json = "{\n  \"class\": \"" + className + "\",\n  \"tools\": [\n"
+            + String.join(",\n", toolEntries) + "\n  ]\n}\n";
+        try {
+            FileObject file = processingEnv.getFiler()
+                .createResource(StandardLocation.CLASS_OUTPUT, "", resource);
+            try (Writer w = file.openWriter()) {
+                w.write(json);
+            }
+            note("Axiom: generated " + resource);
+        } catch (IOException e) {
+            processingEnv.getMessager().printMessage(Diagnostic.Kind.WARNING,
+                "Axiom: could not write " + resource + ": " + e.getMessage());
+        }
     }
 
     // ------------------------------------------------------------------

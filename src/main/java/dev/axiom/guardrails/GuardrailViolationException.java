@@ -1,6 +1,6 @@
 package dev.axiom.guardrails;
 
-/** Thrown when a guardrail blocks the task or the agent's final answer. */
+/** Thrown when a guardrail blocks the task, a tool call, or the agent's final answer. */
 public final class GuardrailViolationException extends RuntimeException {
     private final String guardrailName;
 

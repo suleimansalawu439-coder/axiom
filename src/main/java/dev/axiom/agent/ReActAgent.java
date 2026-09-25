@@ -475,6 +475,7 @@ public final class ReActAgent {
     private String executeToolCall(ToolCallRequest call, ToolRegistry registry,
                                    Map<String, String> replayedResults) {
         String idemKey = idempotencyKey(call);
+        applyToolCallGuardrails(call);
         emit(new AgentEvent.ToolCallStarted(Instant.now(), call));
         long start = System.currentTimeMillis();
         String result;
@@ -507,7 +508,37 @@ public final class ReActAgent {
         }
         emit(new AgentEvent.ToolCallFinished(
             Instant.now(), call, result, System.currentTimeMillis() - start));
+        // Lifecycle hook for stateful guardrails (capability tokens, …).
+        // Runs for replayed completions on resume too, so journaled truth
+        // rebuilds guardrail state in order.
+        for (Guardrail g : config.guardrails()) {
+            g.onToolCompleted(call.name());
+        }
         return result;
+    }
+
+    /**
+     * Run every configured guardrail's per-tool-call check before dispatch.
+     * A block aborts the run with {@link GuardrailViolationException} (after a
+     * {@link AgentEvent.GuardrailBlocked} event with side {@code "tool"}) —
+     * capability violations are fail-closed and journaled, never silent.
+     * A {@code Replace} verdict is meaningless for tool calls and is treated
+     * as a block rather than silently bypassed.
+     */
+    private void applyToolCallGuardrails(ToolCallRequest call) {
+        for (Guardrail g : config.guardrails()) {
+            Verdict v = g.checkToolCall(call.name(), call.arguments());
+            if (v instanceof Verdict.Block b) {
+                emit(new AgentEvent.GuardrailBlocked(
+                    Instant.now(), g.name(), "tool", b.reason()));
+                throw new GuardrailViolationException(g.name(), b.reason());
+            } else if (v instanceof Verdict.Replace) {
+                emit(new AgentEvent.GuardrailBlocked(Instant.now(), g.name(), "tool",
+                    "guardrail returned Replace for a tool call, which is not supported"));
+                throw new GuardrailViolationException(g.name(),
+                    "guardrail returned Replace for a tool call, which is not supported");
+            }
+        }
     }
 
     /**

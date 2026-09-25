@@ -78,7 +78,7 @@ public final class AgentConfig {
 
     public static final class Builder {
         private LlmClient client;
-        private final ToolRegistry tools = new ToolRegistry();
+        private ToolRegistry tools = new ToolRegistry();
         private String systemPrompt = "You are a helpful AI assistant with access to tools. "
             + "Think step by step, use tools when they help, and always give a final answer.";
         private int maxIterations = 15;
@@ -102,6 +102,15 @@ public final class AgentConfig {
         /** Register prebuilt tool definitions (MCP tools, supervisor delegate tools, …). */
         public Builder withToolDefinitions(ToolDefinition... definitions) {
             for (ToolDefinition d : definitions) tools.register(d);
+            return this;
+        }
+        /**
+         * Use a prebuilt registry (replaces the builder's own). Needed when a
+         * component must share the agent's exact registry instance — e.g.
+         * {@code CapabilityGuardrail.forRegistry(registry)}.
+         */
+        public Builder withRegistry(ToolRegistry registry) {
+            this.tools = registry;
             return this;
         }
         public Builder withSystemPrompt(String prompt) { this.systemPrompt = prompt; return this; }

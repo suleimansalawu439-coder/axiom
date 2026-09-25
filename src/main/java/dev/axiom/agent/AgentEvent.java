@@ -44,9 +44,9 @@ public sealed interface AgentEvent permits
     record BudgetUpdated(Instant timestamp, ChatResponse.TokenUsage charged,
                          Budget.Snapshot snapshot) implements AgentEvent {}
     /**
-     * Emitted when a guardrail blocks the task or the final answer. The run
+     * Emitted when a guardrail blocks the task, a tool call, or the final answer. The run
      * aborts with {@link dev.axiom.guardrails.GuardrailViolationException}
-     * right after this event. {@code side} is "input" or "output".
+     * right after this event. {@code side} is "input", "output", or "tool".
      */
     record GuardrailBlocked(Instant timestamp, String guardrailName,
                             String side, String reason) implements AgentEvent {}

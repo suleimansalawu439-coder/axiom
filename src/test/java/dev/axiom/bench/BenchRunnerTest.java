@@ -144,7 +144,7 @@ class BenchRunnerTest {
         long pacingMs = 250;
         long start = System.currentTimeMillis();
         BenchReceipt receipt = BenchRunner.run(tasks, factory(),
-            ModelPrices.defaults(), "gemini-2.0-flash", "live-gemini", pacingMs,
+            ModelPrices.defaults(), "gemini-3.8-flash", "live-gemini", pacingMs,
             "honesty disclosure for tests");
         long elapsed = System.currentTimeMillis() - start;
 

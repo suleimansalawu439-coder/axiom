@@ -57,6 +57,6 @@ java -jar lib/junit-platform-console-standalone-1.10.3.jar execute \
   --scan-class-path=target/test-classes \
   --include-classname='.*Test' 2>&1 | tail -12
 
-echo "==> Packaging axiom-0.5.2.jar..."
-jar --create --file target/axiom-0.5.2.jar -C target/classes .
-echo "Done: target/axiom-0.5.2.jar"
+echo "==> Packaging axiom-0.5.3.jar..."
+jar --create --file target/axiom-0.5.3.jar -C target/classes .
+echo "Done: target/axiom-0.5.3.jar"

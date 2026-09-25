@@ -23,7 +23,7 @@ public final class BenchProvider {
     public static final List<Preset> PRESETS = List.of(
         new Preset("gemini",
             "https://generativelanguage.googleapis.com/v1beta/openai",
-            "GEMINI_API_KEY", "gemini-2.0-flash", 4_000,
+            "GEMINI_API_KEY", "gemini-3.8-flash", 4_000,
             "https://aistudio.google.com/apikey — free tier, no card required"),
         new Preset("openrouter",
             "https://openrouter.ai/api/v1",

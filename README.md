@@ -137,6 +137,10 @@ try {
 
 Every LLM call is charged; breaching a limit throws `BudgetExceededException` (carrying the full snapshot). `BudgetUpdated` events fire after every call — even the breaching one — so UIs can render live cost meters. Budgets are thread-safe and shareable across a supervisor team.
 
+## v0.5.3 — what's new
+
+Live Gemini preset now defaults to `gemini-3.8-flash` (Google retired `gemini-2.0-flash`; the new default is Google's own recommended replacement from the live API 404). The model can still be overridden per run with `AXIOM_BENCH_MODEL`, so a future model retirement never needs a rebuild to work around.
+
 ## v0.5.2 — what's new
 
 Fully detailed benchmark reports. Every run now records a step-by-step trace per task — each agent iteration's model text plus every tool call with arguments, observed results, and durations — captured from agent events. The JSON receipt carries the prompt, expected answer, trace, SWE test-command output, and the full harness stack trace on failures; `BenchMain` also writes a human-readable Markdown report (`benchmarks/receipts/report-<mode>-<timestamp>.md`) next to the receipt, so a run can be audited turn by turn without re-running it.
@@ -353,12 +357,12 @@ GAIA-style and SWE-bench-style runners that record machine-readable receipts —
 
 ```bash
 # Offline / deterministic (default): scripted model fixtures, REAL tool execution
-java -cp "target/axiom-0.5.2.jar:lib/*" dev.axiom.bench.BenchMain
+java -cp "target/axiom-0.5.3.jar:lib/*" dev.axiom.bench.BenchMain
 # -> benchmarks/receipts/receipt-fixture-<timestamp>.json
 
 # Live: against a real model, free or paid
 AXIOM_BENCH_PROVIDER=gemini GEMINI_API_KEY=... \
-  java -cp "target/axiom-0.5.2.jar:lib/*" dev.axiom.bench.BenchMain --live
+  java -cp "target/axiom-0.5.3.jar:lib/*" dev.axiom.bench.BenchMain --live
 # -> benchmarks/receipts/receipt-live-gemini-<timestamp>.json
 ```
 
@@ -409,7 +413,7 @@ If `webSearch`'s signature and its schema ever disagree, the build fails. That's
 No Maven required (a `pom.xml` is included for standard environments):
 
 ```bash
-./build.sh   # compiles, runs all tests, packages target/axiom-0.5.2.jar
+./build.sh   # compiles, runs all tests, packages target/axiom-0.5.3.jar
 ```
 
 Requirements: JDK 21 (auto-detected at `~/workspace/tools/jdk-21`).
@@ -418,7 +422,7 @@ Requirements: JDK 21 (auto-detected at `~/workspace/tools/jdk-21`).
 
 ```bash
 export OPENAI_API_KEY=sk-...
-java -cp "target/axiom-0.5.2.jar:lib/*" dev.axiom.demo.DemoAgent "What is 17*23, and save the answer as a note?"
+java -cp "target/axiom-0.5.3.jar:lib/*" dev.axiom.demo.DemoAgent "What is 17*23, and save the answer as a note?"
 ```
 
 ## Roadmap
@@ -427,6 +431,7 @@ java -cp "target/axiom-0.5.2.jar:lib/*" dev.axiom.demo.DemoAgent "What is 17*23,
 
 ## Status
 
+v0.5.3 — Gemini live preset moved to gemini-3.8-flash (2.0-flash retired by Google); per-run model override via AXIOM_BENCH_MODEL documented.
 v0.5.2 — fully detailed benchmark reports (per-task step-by-step traces in JSON + Markdown report), 194 tests green.
 v0.5.1 — proxy support (`HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY`/`NO_PROXY` honored with auth and bypass rules), 188 tests green.
 v0.5.0 — honest streaming retries (buffer-per-attempt, `Retry-After`), streaming cache with token replay, exactly-once durable side-effect ledger with `@Tool(idempotent)`, compile-time schema single-source-of-truth (unique tool names, Jackson-deserializability checks, runtime reads the generated artifact), trajectory eval scorers + `EvalGate` CI gate, free-tier benchmark path (`gemini`/`openrouter`/`groq`/`ollama`, paced, $0 receipts with honesty notes). 177 tests green.

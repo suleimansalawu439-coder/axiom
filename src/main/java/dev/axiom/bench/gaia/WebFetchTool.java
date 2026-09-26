@@ -18,12 +18,43 @@ import java.util.regex.Pattern;
  *
  * <p>HTML is stripped to visible text (scripts/styles removed); output is
  * truncated to a bounded size so a huge page can't blow up the model's
- * context. Declared {@code idempotent} — fetching is a pure read.
+ * context. The default cap is 8,000 characters, overridable with
+ * {@code -Daxiom.webfetch.maxChars=N}; truncation is marked with how many
+ * characters were omitted so the agent knows content was cut.
+ * Declared {@code idempotent} — fetching is a pure read.
  */
 public final class WebFetchTool {
 
     private static final int MAX_BYTES = 200_000;
-    private static final int MAX_TEXT_CHARS = 20_000;
+
+    /** Default cap on returned text; override with -Daxiom.webfetch.maxChars=N. */
+    static final int DEFAULT_MAX_TEXT_CHARS = 8_000;
+    static final String MAX_CHARS_PROPERTY = "axiom.webfetch.maxChars";
+
+    /** Effective text cap: the system property override, or the default. */
+    static int maxTextChars() {
+        String v = System.getProperty(MAX_CHARS_PROPERTY);
+        if (v != null) {
+            try {
+                int n = Integer.parseInt(v.trim());
+                if (n > 0) return n;
+            } catch (NumberFormatException ignored) {
+                // fall through to the default
+            }
+        }
+        return DEFAULT_MAX_TEXT_CHARS;
+    }
+
+    /**
+     * Truncate to the effective cap, marking how many characters were
+     * omitted. Package-visible for unit tests.
+     */
+    static String truncateToCap(String text) {
+        int cap = maxTextChars();
+        if (text.length() <= cap) return text;
+        int omitted = text.length() - cap;
+        return text.substring(0, cap) + "[truncated: " + omitted + " chars omitted]";
+    }
 
     private static final Pattern SCRIPT_STYLE =
         Pattern.compile("(?is)<(script|style)[^>]*>.*?</\\1>");
@@ -63,7 +94,7 @@ public final class WebFetchTool {
         try {
             HttpRequest req = HttpRequest.newBuilder(uri)
                 .timeout(Duration.ofSeconds(30))
-                .header("User-Agent", "axiom-bench/0.11.0 (+benchmark harness)")
+                .header("User-Agent", "axiom-bench/0.11.1 (+benchmark harness)")
                 .GET()
                 .build();
             HttpResponse<byte[]> res =
@@ -84,9 +115,7 @@ public final class WebFetchTool {
                 text = new String(body, java.nio.charset.StandardCharsets.UTF_8);
             }
             text = WS.matcher(text.strip()).replaceAll(" ");
-            if (text.length() > MAX_TEXT_CHARS) {
-                text = text.substring(0, MAX_TEXT_CHARS) + "…[truncated]";
-            }
+            text = truncateToCap(text);
             return text.isEmpty() ? "ERROR: no text content at " + url : text;
         } catch (Exception e) {
             return "ERROR: fetch failed for " + url + ": " + e;

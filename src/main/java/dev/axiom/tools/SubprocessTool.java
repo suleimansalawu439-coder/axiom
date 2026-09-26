@@ -25,6 +25,12 @@ import java.util.concurrent.TimeUnit;
  *       at all (e.g. only {@code git}, {@code ls}).</li>
  *   <li><b>Capture + kill.</b> Stdout/stderr are captured (bounded) and the
  *       process is forcibly destroyed on timeout.</li>
+ *   <li><b>Windows Python-shim fail-fast.</b> On Windows boxes without a
+ *       real Python, {@code python3}/{@code python} resolve to the
+ *       install-manager stub, which hangs instead of running scripts.
+ *       Its stderr signatures are detected while the process runs and
+ *       the call is aborted immediately with a diagnostic — the full
+ *       timeout is never waited out.</li>
  * </ul>
  *
  * <pre>{@code
@@ -50,6 +56,56 @@ public final class SubprocessTool {
 
     private static final Set<String> DEFAULT_ENV = Set.of(
         "PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "TEMP", "TMP", "USER");
+
+    /**
+     * Substrings (lowercase) identifying the Windows Python install-manager
+     * shim — the "App execution alias" stub that opens a downloader instead
+     * of running scripts when no real Python is installed. Seen in the wild:
+     * "[WARNING] Failed to read unmanaged installs: ...", "Waiting for other
+     * operations to complete. . .", "Python install manager was successfully
+     * updated to ...".
+     */
+    private static final List<String> PYTHON_SHIM_SIGNATURES = List.of(
+        "python install manager",
+        "python was not found",
+        "ms-windows-store",
+        "app execution alias",
+        "failed to read unmanaged installs",
+        "waiting for other operations to complete");
+
+    /**
+     * Returns the first known Windows-Python-shim signature found in
+     * {@code output} (case-insensitive), or {@code null} if none matches.
+     * Package-visible for unit tests — the live path can only be exercised
+     * against a real shim, which the test suite must not depend on.
+     */
+    static String findPythonShimSignature(String output) {
+        if (output == null || output.isEmpty()) return null;
+        String lower = output.toLowerCase(java.util.Locale.ROOT);
+        for (String sig : PYTHON_SHIM_SIGNATURES) {
+            if (lower.contains(sig)) return sig;
+        }
+        return null;
+    }
+
+    /** True for executable names that may resolve to the Windows Python shim. */
+    static boolean isPythonExecutable(String exeName) {
+        if (exeName == null) return false;
+        String n = exeName.toLowerCase(java.util.Locale.ROOT);
+        if (n.endsWith(".exe")) n = n.substring(0, n.length() - 4);
+        return n.equals("python") || n.equals("pythonw") || n.startsWith("python3");
+    }
+
+    /** Fail-fast diagnostic shown to the agent when the shim is detected. */
+    static String pythonShimDiagnostic(String exeName, String signature) {
+        return "ERROR: '" + exeName + "' on this machine is the Windows Python "
+            + "install-manager shim, not a real Python interpreter — it opens a "
+            + "downloader instead of running scripts, so the call was aborted "
+            + "instead of hanging on the timeout. Install a real Python 3 from "
+            + "https://www.python.org/downloads/ and make sure '" + exeName + "' "
+            + "is on PATH, then retry. "
+            + "(Detected shim output: \"" + signature + "\".)";
+    }
 
     private final Path root;
     private final Set<String> allowedEnv;
@@ -128,13 +184,51 @@ public final class SubprocessTool {
         BoundedCapture err = new BoundedCapture(process.getErrorStream(), maxOutputBytes);
         Thread t1 = Thread.ofPlatform().daemon().start(out);
         Thread t2 = Thread.ofPlatform().daemon().start(err);
+        // Poll for completion so the Windows Python shim (which prints its
+        // install-manager spam to stdout/stderr, then hangs) can be detected
+        // and aborted long before the timeout expires. Only python
+        // executables are eligible — the signatures are shim-specific.
+        boolean pythonExe = isPythonExecutable(exeName);
+        long deadline = start + timeout.toMillis();
+        boolean completed = false;
+        boolean shimmed = false;
+        String shimSignature = null;
         boolean timedOut = false;
-        int exitCode;
+        int exitCode = -1;
         try {
-            if (process.waitFor(timeout.toMillis(), TimeUnit.MILLISECONDS)) {
-                exitCode = process.exitValue();
-            } else {
-                timedOut = true;
+            while (System.currentTimeMillis() < deadline) {
+                if (pythonExe) {
+                    String sig = findPythonShimSignature(
+                        out.snapshot() + "\n" + err.snapshot());
+                    if (sig != null) {
+                        shimmed = true;
+                        shimSignature = sig;
+                        break;
+                    }
+                }
+                if (process.waitFor(250, TimeUnit.MILLISECONDS)) {
+                    completed = true;
+                    exitCode = process.exitValue();
+                    break;
+                }
+            }
+            if (shimmed) {
+                // Fail fast: kill the stub and report a diagnostic instead of
+                // waiting out the timeout and feeding shim spam to the model.
+                process.destroyForcibly();
+                try {
+                    process.waitFor(5, TimeUnit.SECONDS);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                }
+                t1.join(5000);
+                t2.join(5000);
+                return new ExecResult(127, out.text(),
+                    pythonShimDiagnostic(exeName, shimSignature),
+                    false, System.currentTimeMillis() - start);
+            }
+            boolean timedOutNow = !completed;
+            if (timedOutNow) {
                 process.destroyForcibly();
                 try {
                     process.waitFor(5, TimeUnit.SECONDS);
@@ -142,6 +236,7 @@ public final class SubprocessTool {
                     Thread.currentThread().interrupt();
                 }
                 exitCode = -1;
+                timedOut = true;
             }
             t1.join(5000);
             t2.join(5000);
@@ -172,20 +267,27 @@ public final class SubprocessTool {
                 byte[] chunk = new byte[8192];
                 int n;
                 while ((n = in.read(chunk)) >= 0) {
-                    int room = (int) Math.max(0, maxBytes - buf.size());
-                    if (room == 0) {
-                        truncated = true;
-                        continue;
+                    synchronized (this) {
+                        int room = (int) Math.max(0, maxBytes - buf.size());
+                        if (room == 0) {
+                            truncated = true;
+                            continue;
+                        }
+                        buf.write(chunk, 0, Math.min(n, room));
+                        if (n > room) truncated = true;
                     }
-                    buf.write(chunk, 0, Math.min(n, room));
-                    if (n > room) truncated = true;
                 }
             } catch (IOException ignored) {
             }
         }
 
+        /** Thread-safe snapshot of what's been captured so far. */
+        synchronized String snapshot() {
+            return buf.toString(java.nio.charset.StandardCharsets.UTF_8);
+        }
+
         String text() {
-            String s = buf.toString(java.nio.charset.StandardCharsets.UTF_8);
+            String s = snapshot();
             return truncated ? s + "\n[output truncated at " + maxBytes + " bytes]" : s;
         }
     }

@@ -43,12 +43,12 @@ import java.util.function.BiFunction;
  * <pre>
  * # Dry run (default): lists the 53 tasks and the attempted/unattempted
  * # split without calling any model
- * java -cp "target/axiom-0.11.0.jar:lib/*" dev.axiom.bench.gaia.GaiaMain
+ * java -cp "target/axiom-0.11.1.jar:lib/*" dev.axiom.bench.gaia.GaiaMain
  *
  * # Live on the free tier (key from https://aistudio.google.com/apikey):
  * export GEMINI_API_KEY=...
  * AXIOM_BENCH_PROVIDER=gemini \
- *   java -cp "target/axiom-0.11.0.jar:lib/*" dev.axiom.bench.gaia.GaiaMain --live
+ *   java -cp "target/axiom-0.11.1.jar:lib/*" dev.axiom.bench.gaia.GaiaMain --live
  *
  * # Knobs:
  * #   AXIOM_BENCH_MODEL=gemini-3.5-flash-lite  (default for provider=gemini)
@@ -210,7 +210,7 @@ public final class GaiaMain {
                     new GaiaTools.Calc(),
                     new WebFetchTool(),
                     SubprocessTool.builder(root)
-                        .allowCommands("python3", "cat", "ls", "head", "wc",
+                        .allowCommands("python3", "python", "cat", "ls", "head", "wc",
                             "grep", "tr", "cut", "sort", "echo")
                         .build());
             var agent = new Axiom.Agent(b.build());

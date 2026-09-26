@@ -97,4 +97,63 @@ class SubprocessToolTest {
         Object out = registry.invoke("run", Map.of("command", List.of("echo", "via-registry")));
         assertTrue(out.toString().contains("via-registry"));
     }
+
+    // --- Windows Python install-manager shim detection (no real subprocess) ---
+
+    @Test
+    void pythonShimSignaturesAreDetected() {
+        // Signatures observed in the GAIA L1 live run (receipt 2026-09-26):
+        assertEquals("failed to read unmanaged installs",
+            SubprocessTool.findPythonShimSignature(
+                "[WARNING] Failed to read unmanaged installs: expected str, bytes or os.PathLike object, not NoneType\r\n"));
+        assertEquals("waiting for other operations to complete",
+            SubprocessTool.findPythonShimSignature("Waiting for other operations to complete. . .\r\n"));
+        assertEquals("python install manager",
+            SubprocessTool.findPythonShimSignature(
+                "Python install manager was successfully updated to 26.3.\r\n"));
+        // Signatures from the brief:
+        assertEquals("python was not found",
+            SubprocessTool.findPythonShimSignature("Python was not found; run without arguments to install from the Microsoft Store"));
+        assertEquals("ms-windows-store",
+            SubprocessTool.findPythonShimSignature("start ms-windows-store://pdp/?ProductId=9NRWMJP3717K"));
+        assertEquals("app execution alias",
+            SubprocessTool.findPythonShimSignature("This file is an App execution alias; it cannot be run directly"));
+    }
+
+    @Test
+    void shimDetectionIsCaseInsensitive() {
+        assertNotNull(SubprocessTool.findPythonShimSignature("PYTHON INSTALL MANAGER"));
+        assertNotNull(SubprocessTool.findPythonShimSignature("Python Was Not Found"));
+    }
+
+    @Test
+    void ordinaryOutputIsNotAShim() {
+        assertNull(SubprocessTool.findPythonShimSignature("hello world\n42\n"));
+        assertNull(SubprocessTool.findPythonShimSignature(""));
+        assertNull(SubprocessTool.findPythonShimSignature(null));
+        // A script merely mentioning "python" is not the shim.
+        assertNull(SubprocessTool.findPythonShimSignature("python version check passed"));
+    }
+
+    @Test
+    void pythonExecutableNamesRecognized() {
+        assertTrue(SubprocessTool.isPythonExecutable("python3"));
+        assertTrue(SubprocessTool.isPythonExecutable("python"));
+        assertTrue(SubprocessTool.isPythonExecutable("python3.exe"));
+        assertTrue(SubprocessTool.isPythonExecutable("python.exe"));
+        assertTrue(SubprocessTool.isPythonExecutable("pythonw"));
+        assertFalse(SubprocessTool.isPythonExecutable("echo"));
+        assertFalse(SubprocessTool.isPythonExecutable("pypy"));
+        assertFalse(SubprocessTool.isPythonExecutable(null));
+    }
+
+    @Test
+    void shimDiagnosticTellsUserToInstallRealPython() {
+        String d = SubprocessTool.pythonShimDiagnostic("python3", "python install manager");
+        assertTrue(d.startsWith("ERROR:"), d);
+        assertTrue(d.contains("python3"), d);
+        assertTrue(d.contains("https://www.python.org/downloads/"), d);
+        assertTrue(d.contains("python install manager"), d);
+        assertTrue(d.contains("aborted"), d);
+    }
 }

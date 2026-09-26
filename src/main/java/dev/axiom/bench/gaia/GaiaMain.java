@@ -43,12 +43,12 @@ import java.util.function.BiFunction;
  * <pre>
  * # Dry run (default): lists the 53 tasks and the attempted/unattempted
  * # split without calling any model
- * java -cp "target/axiom-0.11.1.jar:lib/*" dev.axiom.bench.gaia.GaiaMain
+ * java -cp "target/axiom-0.12.0.jar:lib/*" dev.axiom.bench.gaia.GaiaMain
  *
  * # Live on the free tier (key from https://aistudio.google.com/apikey):
  * export GEMINI_API_KEY=...
  * AXIOM_BENCH_PROVIDER=gemini \
- *   java -cp "target/axiom-0.11.1.jar:lib/*" dev.axiom.bench.gaia.GaiaMain --live
+ *   java -cp "target/axiom-0.12.0.jar:lib/*" dev.axiom.bench.gaia.GaiaMain --live
  *
  * # Knobs:
  * #   AXIOM_BENCH_MODEL=gemini-3.5-flash-lite  (default for provider=gemini)
@@ -57,7 +57,30 @@ import java.util.function.BiFunction;
  * #   AXIOM_BENCH_PARALLEL=4  concurrent tasks (default 4)
  * #   --sequential            one task at a time
  * #   AXIOM_GAIA_JSON=path    load a same-shaped dataset JSON from disk
+ * #   --attachments DIR       mount user-supplied attachment files: files in
+ * #                           DIR named "<taskId>-<original-name>" are copied
+ * #                           into the matching task's workspace (the prefix
+ * #                           is stripped), converting UNATTEMPTED tasks into
+ * #                           attempted ones. Task ids come from the dry run's
+ * #                           UNATTEMPTED list.
+ * #   AXIOM_BENCH_SMART_MODEL=gemini-3.8-flash
+ * #   AXIOM_BENCH_SMART_MODEL_BUDGET=20
+ * #                           route tasks flagged hard by a documented
+ * #                           heuristic to the stronger model, up to BUDGET
+ * #                           tasks per run (default 20); everything else
+ * #                           uses AXIOM_BENCH_MODEL. Per-model spend lands
+ * #                           in the receipt notes.
  * </pre>
+ *
+ * <p>Agent improvements over the first live run (11/42): a {@code web_search}
+ * tool (Wikipedia API + DuckDuckGo fallback, keyless) so the agent stops
+ * guessing URLs; an {@code answer} terminal tool that commits one clean
+ * final answer and ends the run; mechanical answer normalization (trim,
+ * unquote, Unicode NFKC — never reinterpretation) before the unchanged
+ * official scorer; tool descriptions that route arithmetic to
+ * {@code calculate} and forbid URL guessing; and a rolling context window
+ * that stubs old tool outputs past 24k chars
+ * ({@code -Daxiom.context.toolOutputCap=N}).
  *
  * <p>Default model note: the measured free-tier workhorse is
  * {@code gemini-3.5-flash-lite} (15 RPM / 500 requests/day, verified
@@ -83,17 +106,25 @@ public final class GaiaMain {
 
     /**
      * The prompt given to the agent for a GAIA task: GAIA's own convention
-     * of instructing a short final answer, so the raw output can be scored
-     * with the official quasi-exact-match function (no extraction, no judge).
+     * of instructing a short final answer, plus the tool workflow the first
+     * real run showed the model needs spelled out — search before fetching
+     * (never guess URLs), calculate for arithmetic (never python3), and
+     * commit through the {@code answer} tool instead of chat prose.
      */
     static String promptFor(GaiaItem item) {
-        return "Answer the following question. Use the available tools when they "
-            + "help: web_fetch to read web pages, read_file/list_files for files "
-            + "in the workspace, calculate for arithmetic, run to execute "
-            + "python3 commands in the workspace.\n\n"
-            + "Reply with ONLY the final answer: a short string, a number, or a "
-            + "comma-separated list. No explanation, no preamble, no quotes "
-            + "around it.\n\nQuestion: " + item.question();
+        return "Answer the following question. Your tools:\n"
+            + "- web_search: search the web FIRST when you need facts and don't "
+            + "have a URL. Never guess URLs.\n"
+            + "- web_fetch: read a page once web_search gives you its URL.\n"
+            + "- read_file / list_files: files in the task workspace (attachments "
+            + "are placed here).\n"
+            + "- calculate: ALL arithmetic — never use run/python3 for arithmetic.\n"
+            + "- run: sandboxed python3 for processing files and multi-step scripts "
+            + "(not arithmetic).\n\n"
+            + "When you know the answer, call the answer tool with ONLY the final "
+            + "answer: a short string, a number, or a comma-separated list. No "
+            + "explanation, no preamble, no quotes around it.\n\n"
+            + "Question: " + item.question();
     }
 
     /** BenchTask id for a GAIA item. */
@@ -121,10 +152,20 @@ public final class GaiaMain {
         boolean live = List.of(args).contains("--live");
         List<GaiaItem> items = GaiaDataset.level1();
 
+        Path attachmentsDir = attachmentsDir(List.of(args));
+        final Map<String, List<Path>> attachments;
+        try {
+            attachments = AttachmentMount.match(attachmentsDir, items);
+        } catch (Exception e) {
+            System.err.println("Could not read attachments dir " + attachmentsDir + ": " + e);
+            throw new BenchException("Could not read attachments dir " + attachmentsDir, e);
+        }
+
         List<GaiaItem> attempted = new ArrayList<>();
         List<BenchReceipt.TaskResult> unattempted = new ArrayList<>();
         for (GaiaItem item : items) {
-            if (item.hasAttachment()) {
+            if (item.hasAttachment()
+                    && !attachments.containsKey(taskIdFor(item))) {
                 unattempted.add(unattemptedResult(item));
             } else {
                 attempted.add(item);
@@ -135,13 +176,24 @@ public final class GaiaMain {
             System.out.println("GAIA 2023 validation, Level 1 — dry run (no model calls).");
             System.out.println("Tasks: " + items.size()
                 + " | would attempt: " + attempted.size()
-                + " | unattempted (attachment gated): " + unattempted.size());
+                + " | unattempted (attachment gated): " + unattempted.size()
+                + (attachmentsDir != null
+                    ? " | attachments mounted from " + attachmentsDir + ": " + attachments.size() + " tasks"
+                    : ""));
             System.out.println("Scorer: official GAIA quasi-exact-match "
-                + "(numeric/string/list normalization, no LLM judge).");
+                + "(numeric/string/list normalization, no LLM judge). Raw output "
+                + "gets mechanical normalization only (trim, unquote, Unicode NFKC).");
             System.out.println("Default live model: " + DEFAULT_GEMINI_MODEL
                 + " (15 RPM / 500 req-day free tier; run capped at "
                 + (int) DEFAULT_RPM + " RPM, ~" + estimatedRequests(attempted.size())
                 + " requests estimated).");
+            String smart = System.getenv("AXIOM_BENCH_SMART_MODEL");
+            if (smart != null && !smart.isBlank()) {
+                System.out.println("Smart routing: tasks flagged hard by the documented "
+                    + "heuristic use " + smart + " (budget "
+                    + System.getenv().getOrDefault("AXIOM_BENCH_SMART_MODEL_BUDGET", "20")
+                    + " tasks).");
+            }
             System.out.println("Re-run with --live and GEMINI_API_KEY set to execute.");
             for (BenchReceipt.TaskResult u : unattempted) {
                 System.out.println("  [UNATTEMPTED] " + u.taskId() + " — " + u.detail());
@@ -167,19 +219,34 @@ public final class GaiaMain {
                 System.exit(2);
             }
         }
-        var retrying = new RetryingLlmClient(
-            new OpenAiCompatibleClient(preset.baseUrl(), apiKey == null ? "" : apiKey, model),
-            RetryPolicy.builder()
-                .maxAttempts(6)
-                .initialBackoff(Duration.ofSeconds(2))
-                .build());
         boolean sequential = List.of(args).contains("--sequential");
         double rpm = Double.parseDouble(System.getenv().getOrDefault("AXIOM_BENCH_RPM",
             String.valueOf(DEFAULT_RPM)));
         int parallelism = Integer.parseInt(System.getenv().getOrDefault("AXIOM_BENCH_PARALLEL",
             sequential ? "1" : String.valueOf(DEFAULT_PARALLELISM)));
         RateLimiter limiter = rpm > 0 ? new RateLimiter(rpm, parallelism) : null;
-        LlmClient client = limiter != null ? new RateLimitedLlmClient(retrying, limiter) : retrying;
+        final String finalApiKey = apiKey;
+        java.util.function.Function<String, LlmClient> clientFor = modelName -> {
+            var retrying = new RetryingLlmClient(
+                new OpenAiCompatibleClient(preset.baseUrl(),
+                    finalApiKey == null ? "" : finalApiKey, modelName),
+                RetryPolicy.builder()
+                    .maxAttempts(6)
+                    .initialBackoff(Duration.ofSeconds(2))
+                    .build());
+            return limiter != null ? new RateLimitedLlmClient(retrying, limiter) : retrying;
+        };
+        LlmClient client = clientFor.apply(model);
+
+        // Free-tier smart routing: a stronger model for heuristic-hard tasks.
+        String smartModel = System.getenv("AXIOM_BENCH_SMART_MODEL");
+        int smartBudget = Integer.parseInt(System.getenv()
+            .getOrDefault("AXIOM_BENCH_SMART_MODEL_BUDGET", "20"));
+        ModelRouter router = new ModelRouter(model,
+            smartModel == null || smartModel.isBlank() ? null : smartModel.trim(),
+            smartBudget);
+        LlmClient smartClient = router.smartModel() == null
+            ? null : clientFor.apply(router.smartModel());
         BenchRunConfig runConfig = new BenchRunConfig(parallelism, limiter, true);
 
         Map<String, GaiaItem> byTaskId = new LinkedHashMap<>();
@@ -201,14 +268,33 @@ public final class GaiaMain {
                 }
             }
             final Path root = wd;
+            // Mount user-supplied attachments (task-id prefix stripped).
+            List<Path> mounted = attachments.getOrDefault(task.id(), List.of());
+            if (!mounted.isEmpty()) {
+                try {
+                    AttachmentMount.mount(task.id(), mounted, root);
+                } catch (Exception e) {
+                    throw new BenchException(
+                        "Could not mount attachments for " + task.id(), e);
+                }
+            }
+            // Per-task model routing (smart budget shared across workers).
+            GaiaItem routedItem = byTaskId.get(task.id());
+            String taskModel = routedItem == null ? model
+                : router.route(task.id(), routedItem);
+            LlmClient taskClient = smartClient != null && taskModel.equals(router.smartModel())
+                ? smartClient : client;
             AgentConfig.Builder b = Axiom.agent()
                 .withApprovalHandler(ApprovalHandler.allowAll())
                 .onEvent(events::add)
-                .withClient(client)
+                .withClient(taskClient)
+                .withTerminalTools("answer")
                 .withTools(
                     new GaiaTools.Files(root),
                     new GaiaTools.Calc(),
+                    new GaiaTools.Final(),
                     new WebFetchTool(),
+                    new WebSearchTool(),
                     SubprocessTool.builder(root)
                         .allowCommands("python3", "python", "cat", "ls", "head", "wc",
                             "grep", "tr", "cut", "sort", "echo")
@@ -227,20 +313,54 @@ public final class GaiaMain {
             };
         };
 
+        String modelLabel = router.smartModel() == null ? model
+            : model + " (+" + router.smartModel() + " smart-routed)";
         String notes = "GAIA 2023 validation split, Level 1 (53 tasks) from the public "
             + "ungated mirror jiyu9437/gaia_validation (official gaia-benchmark/GAIA "
-            + "repo is access-gated). 11 tasks ship attachments that could not be "
-            + "fetched and are recorded UNATTEMPTED, never as failures. Scoring is "
-            + "the official GAIA quasi-exact-match (numeric/string/list "
-            + "normalization, no LLM judge, no partial credit, raw agent output). "
+            + "repo is access-gated). " + unattempted.size() + " tasks ship attachments "
+            + "that could not be fetched and are recorded UNATTEMPTED, never as "
+            + "failures"
+            + (attachmentsDir != null
+                ? "; " + attachments.size() + " tasks had user-supplied attachments "
+                  + "mounted from " + attachmentsDir : "")
+            + ". Scoring is the official GAIA quasi-exact-match "
+            + "(numeric/string/list normalization, no LLM judge, no partial "
+            + "credit); the raw agent output gets mechanical normalization only "
+            + "(trim, strip balanced quotes, Unicode NFKC — never reinterpreted). "
             + "Provider: " + preset.id() + " (" + preset.keySignup() + "), model "
-            + model + ". Parallelism=" + parallelism + "; shared token-bucket "
+            + modelLabel + ". Parallelism=" + parallelism + "; shared token-bucket "
             + "rate limiter at " + rpm + " RPM; daily/plan quota exhaustion aborts "
             + "the run immediately. Cost basis: provider free tier ($0). "
             + "NOT an official GAIA score or leaderboard result.";
+        BenchRunner.OutputScorer scorer = (output, expected) ->
+            GaiaScorer.score(GaiaAnswer.normalize(output), expected);
         BenchReceipt attemptedReceipt = BenchRunner.run(tasks, factory,
-            ModelPrices.defaults(), model, mode, 0, notes, runConfig,
-            GaiaScorer::score);
+            ModelPrices.defaults(), modelLabel, mode, 0, notes, runConfig,
+            scorer);
+
+        // Per-model spend from the smart router's assignments.
+        Map<String, String> assigned = router.assignments();
+        Map<String, long[]> tokensByModel = new LinkedHashMap<>(); // model -> [tasks, tokens]
+        for (BenchReceipt.TaskResult r : attemptedReceipt.results()) {
+            String m = assigned.getOrDefault(r.taskId(), model);
+            long[] acc = tokensByModel.computeIfAbsent(m, k -> new long[2]);
+            acc[0]++;
+            acc[1] += r.totalTokens();
+        }
+        if (router.smartModel() != null) {
+            StringBuilder routing = new StringBuilder(
+                " Model routing: heuristic-hard tasks (question > "
+                    + ModelRouter.HARD_QUESTION_CHARS + " chars or multi-step keywords: "
+                    + String.join(", ", ModelRouter.HARD_KEYWORDS)
+                    + ") used " + router.smartModel() + "; budget was "
+                    + System.getenv().getOrDefault("AXIOM_BENCH_SMART_MODEL_BUDGET", "20")
+                    + " tasks, " + router.smartRemaining() + " unspent. Per-model: ");
+            tokensByModel.forEach((m, acc) -> routing.append(m)
+                .append("=").append(acc[0]).append(" tasks/").append(acc[1])
+                .append(" tokens; "));
+            routing.append("The heuristic is a triage signal, not a guarantee.");
+            notes = notes + routing;
+        }
 
         // Merge back into task order: attempted results plus unattempted markers.
         Map<String, BenchReceipt.TaskResult> byId = new LinkedHashMap<>();
@@ -249,7 +369,7 @@ public final class GaiaMain {
         List<BenchReceipt.TaskResult> merged = new ArrayList<>();
         for (GaiaItem item : items) merged.add(byId.get(taskIdFor(item)));
         BenchReceipt receipt = new BenchReceipt("axiom", dev.axiom.Version.CURRENT,
-            model, mode, Instant.now(), merged, notes,
+            modelLabel, mode, Instant.now(), merged, notes,
             attemptedReceipt.wallClockMs(), parallelism);
 
         String stamp = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss")
@@ -275,5 +395,16 @@ public final class GaiaMain {
     /** Rough request estimate for the dry-run readout: ~8 LLM calls per task. */
     static int estimatedRequests(int taskCount) {
         return taskCount * 8;
+    }
+
+    /**
+     * The {@code --attachments <dir>} argument: a folder of user-supplied
+     * attachment files named {@code "<taskId>-<original-name>"}. Null when
+     * the flag is absent.
+     */
+    static Path attachmentsDir(List<String> args) {
+        int i = args.indexOf("--attachments");
+        if (i < 0 || i + 1 >= args.size()) return null;
+        return Paths.get(args.get(i + 1));
     }
 }

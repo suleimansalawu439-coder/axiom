@@ -1,0 +1,66 @@
+AXIOM GAIA BENCHMARK KIT v0.12.0
+==============================
+
+Runs the real GAIA 2023 validation Level 1 set (53 tasks) with the
+official GAIA quasi-exact-match scorer. Costs $0 (Gemini free tier).
+
+CONTENTS
+--------
+  axiom-0.12.0.jar   the benchmark runner (this exact file is what the
+                     scripts below reference)
+  lib/*.jar          dependency jars (Jackson, SLF4J, JUnit launcher)
+  run-gaia.sh        macOS / Linux launcher
+  run-gaia.bat       Windows launcher
+  READ-ME.txt        this file
+
+ONE-TIME SETUP
+--------------
+  1. Install JDK 21: https://adoptium.net/temurin/releases/?version=21
+     Check:  java -version   (must say 21)
+  2. Get a FREE Gemini API key: https://aistudio.google.com/apikey
+     (no card required)
+
+TO RUN
+------
+  macOS/Linux:  ./run-gaia.sh
+  Windows:      double-click run-gaia.bat (or run it in a terminal)
+
+The launcher prompts for your key if GEMINI_API_KEY is not already set.
+
+Takes roughly 30-45 minutes: 42 attempted tasks, paced at 12
+requests/minute to stay under the free-tier limit (15/min, 500/day on
+gemini-3.5-flash-lite). 11 tasks ship attachment files that are
+access-gated and are recorded UNATTEMPTED, never failed.
+
+RESULTS
+-------
+A JSON receipt and a Markdown report are written to
+benchmarks/receipts/ under this folder. Send both files back so the
+results can be recorded.
+
+WHAT'S NEW IN v0.12.0
+---------------------
+  - web_search tool: keyless Wikipedia + DuckDuckGo search, so the
+    agent searches before fetching instead of guessing URLs.
+  - Terminal "answer" tool: the agent commits one clean answer and the
+    run ends; formatting hygiene (trim/unquote) never rescues a wrong
+    magnitude. The official scorer is unchanged.
+  - Tool routing: arithmetic always goes to the calculator, never to
+    the run tool; fetch requires an exact URL.
+  - Context cap: tool outputs past 24k chars are stubbed in the model's
+    view (newest two kept whole), so long pages can't blow up context.
+  - Optional smart-model routing: AXIOM_BENCH_SMART_MODEL (e.g.
+    gemini-3.8-flash) + AXIOM_BENCH_SMART_MODEL_BUDGET (default 20)
+    routes heuristic-hard tasks to a stronger model; per-model
+    task/token counts land in the receipt notes.
+  - --attachments <dir>: put files named "<taskId>-<original-name>" in
+    a folder and pass it (edit the launcher to add it) to attempt the
+    11 attachment-gated tasks instead of recording them UNATTEMPTED.
+
+HONEST BOUNDARIES
+-----------------
+These numbers are validation-split measurements from an unofficial
+harness, never official GAIA leaderboard scores. The scorer is the
+official GAIA quasi-exact-match port (no LLM judge, no partial
+credit). Repeated tuning against the same tasks risks overfitting;
+Levels 2 and 3 are the future check.

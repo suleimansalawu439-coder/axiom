@@ -200,6 +200,14 @@ public final class ReActAgent {
             String observation = executeResumedToolCall(call, config.tools(), t);
             messages.add(ChatMessage.toolResult(call.id(), call.name(), observation));
         }
+        // A re-executed pending call may have been terminal (e.g. the run
+        // crashed right after the answer tool completed) — commit it.
+        AgentResult terminal = terminalResult(t.pendingCalls(), messages,
+            t.lastIteration(), toolCallsMade, t.totalUsage());
+        if (terminal != null) {
+            persistMemory(messages);
+            return new ResumedRun(terminal, List.copyOf(messages));
+        }
         LoopState state = new LoopState(messages, t.lastIteration(), t.totalUsage(),
             toolCallsMade, t.recordedResults());
         AgentResult result = runLoop(state);
@@ -371,6 +379,9 @@ public final class ReActAgent {
                 String observation = executeToolCall(call, registry, state.replayedResults());
                 state.messages().add(ChatMessage.toolResult(call.id(), call.name(), observation));
             }
+            AgentResult terminal = terminalResult(response.toolCalls(), state.messages(),
+                iteration, toolCallsMade, totalUsage);
+            if (terminal != null) return terminal;
             state = new LoopState(state.messages(), iteration, totalUsage, toolCallsMade,
                 state.replayedResults());
         }
@@ -426,6 +437,44 @@ public final class ReActAgent {
     }
 
     /**
+     * A terminal tool ends the run: when the model invokes a tool named in
+     * {@link AgentConfig#terminalTools()}, the tool's {@code answer}
+     * argument (or its first argument) is committed as the run's output
+     * instead of continuing the loop. Returns null when no call is
+     * terminal. Output guardrails still apply to the committed answer.
+     *
+     * <p>Resume edge: if the run crashed after a terminal call completed but
+     * before {@code RunFinished} was journaled, resume replays the recorded
+     * tool results and the model is simply asked again — the commit is not
+     * reconstructed from the journal. The common path (no crash) commits
+     * exactly once.
+     */
+    private AgentResult terminalResult(List<ToolCallRequest> calls, List<ChatMessage> messages,
+                                       int iteration, int toolCallsMade,
+                                       ChatResponse.TokenUsage totalUsage) {
+        for (ToolCallRequest call : calls) {
+            if (!config.terminalTools().contains(call.name())) continue;
+            String committed = committedAnswer(call);
+            String answer = applyOutputGuardrails(committed);
+            AgentResult result = new AgentResult(
+                answer, iteration, toolCallsMade, totalUsage, true);
+            emit(new AgentEvent.RunFinished(Instant.now(), result));
+            messages.add(ChatMessage.assistant(answer));
+            return result;
+        }
+        return null;
+    }
+
+    /** The value a terminal tool commits: its {@code answer} argument, else its first argument. */
+    private static String committedAnswer(ToolCallRequest call) {
+        Map<String, Object> args = call.arguments();
+        if (args == null || args.isEmpty()) return "";
+        Object v = args.containsKey("answer") ? args.get("answer")
+            : args.values().iterator().next();
+        return v == null ? "" : String.valueOf(v);
+    }
+
+    /**
      * One model turn. Uses streaming when the client supports it — tokens are
      * emitted as {@link AgentEvent.StreamToken} for live UIs — but always
      * returns the complete turn before the agent acts on it.
@@ -433,12 +482,16 @@ public final class ReActAgent {
     private ChatResponse doChat(List<ChatMessage> messages, List<ToolDefinition> tools,
                                 LlmClient.LlmOptions options, int iteration) {
         emit(new AgentEvent.LlmRequest(Instant.now(), iteration));
+        // Rolling window: the model sees a compacted view (old tool outputs
+        // stubbed); the stored transcript and journal keep full history.
+        List<ChatMessage> modelMessages =
+            ContextWindow.compact(messages, config.toolOutputCharCap());
         ChatResponse response;
         if (config.client() instanceof StreamingLlmClient streaming) {
-            response = streaming.chatStream(messages, tools, options,
+            response = streaming.chatStream(modelMessages, tools, options,
                 token -> emit(new AgentEvent.StreamToken(Instant.now(), iteration, token)));
         } else {
-            response = config.client().chat(messages, tools, options);
+            response = config.client().chat(modelMessages, tools, options);
         }
         emit(new AgentEvent.LlmResponse(Instant.now(), iteration, response));
         return response;

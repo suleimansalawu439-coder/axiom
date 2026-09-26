@@ -72,9 +72,9 @@ public final class WebFetchTool {
 
     @Tool(name = "web_fetch",
           description = "Fetch a web page over HTTP(S) and return its visible "
-              + "text content (HTML tags stripped). Use for questions whose "
-              + "answer is published on an ordinary web page. No JavaScript "
-              + "is executed.",
+              + "text content (HTML tags stripped). Use ONLY when you already "
+              + "have the exact URL. If you need to FIND a page, use web_search "
+              + "first — Do NOT guess URLs. No JavaScript is executed.",
           capabilities = {Capability.NETWORK},
           idempotent = true,
           timeoutSeconds = 45)
@@ -94,7 +94,7 @@ public final class WebFetchTool {
         try {
             HttpRequest req = HttpRequest.newBuilder(uri)
                 .timeout(Duration.ofSeconds(30))
-                .header("User-Agent", "axiom-bench/0.11.1 (+benchmark harness)")
+                .header("User-Agent", "axiom-bench/0.12.0 (+benchmark harness)")
                 .GET()
                 .build();
             HttpResponse<byte[]> res =

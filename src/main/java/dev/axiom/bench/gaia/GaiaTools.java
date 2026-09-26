@@ -88,7 +88,11 @@ public final class GaiaTools {
     public static final class Calc {
         @Tool(name = "calculate",
               description = "Evaluate an arithmetic expression, e.g. "
-                  + "\"(17 * 23 + 5) / 2\". Supports +, -, *, /, parentheses, decimals.",
+                  + "\"(17 * 23 + 5) / 2\". Supports +, -, *, /, parentheses, decimals. "
+                  + "Use this for ALL arithmetic — sums, differences, products, "
+                  + "percentages, unit conversions expressed as arithmetic. Do NOT "
+                  + "use the run tool (python3) for arithmetic: it is slower, "
+                  + "needs an interpreter installed, and wastes calls.",
               capabilities = {},
               idempotent = true)
         public String calculate(
@@ -166,6 +170,35 @@ public final class GaiaTools {
                 if (!match(c)) throw new IllegalArgumentException(
                     "expected '" + c + "' at position " + i);
             }
+        }
+    }
+
+    /**
+     * The final-answer tool. The agent calls this exactly once, with ONLY
+     * the answer — a short string, a number, or a comma-separated list, no
+     * explanation, no preamble, no quotes. Invoking it is terminal: the run
+     * ends immediately and the passed answer is committed as the run's
+     * output (wired via {@code withTerminalTools("answer")}).
+     *
+     * <p>Why a tool instead of chat text: the first real GAIA run showed the
+     * model computing the right value and then rambling around it in prose
+     * (or answering twice with different magnitudes), failing the
+     * quasi-exact-match scorer on formatting rather than reasoning.
+     * Committing through a tool forces one clean answer.
+     */
+    public static final class Final {
+        @Tool(name = "answer",
+              description = "Submit your final answer and END the run. Call this "
+                  + "exactly once, with ONLY the answer: a short string, a number, "
+                  + "or a comma-separated list. No explanation, no preamble, no "
+                  + "quotes around it. Do NOT write the answer in chat text "
+                  + "instead — the run's score is whatever you pass here.",
+              capabilities = {},
+              idempotent = true)
+        public String answer(
+                @ToolParam(description = "The final answer, exactly as it should be scored",
+                           example = "17") String answer) {
+            return "Answer recorded: " + answer;
         }
     }
 }

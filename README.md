@@ -137,6 +137,19 @@ try {
 
 Every LLM call is charged; breaching a limit throws `BudgetExceededException` (carrying the full snapshot). `BudgetUpdated` events fire after every call — even the breaching one — so UIs can render live cost meters. Budgets are thread-safe and shareable across a supervisor team.
 
+## v0.12.0 — what's new
+
+A full capability pass on the agent loop measured by GAIA, driven by the first real run's failure evidence (26.2% on Level 1). Six features, all framework-level, all unit-tested offline (388/388 green):
+
+1. **Web search (`dev.axiom.bench.gaia.WebSearchTool`).** The run showed the agent had `web_fetch` but no search tool, so it guessed URLs or scripted searches through python. New `web_search` tool: Wikipedia Search API first, DuckDuckGo HTML as fallback (both keyless/free), returning title + URL + snippet per result. The prompt now teaches search-then-fetch and both fetch and search descriptions forbid URL guessing.
+2. **Answer hardening.** New terminal `answer` tool commits one clean answer and ends the run — the agent no longer writes the answer in chat text where it can drift. `GaiaAnswer.normalize` applies mechanical hygiene only (trim, strip balanced quotes, Unicode NFKC): a correctly-computed `17` that arrives quoted scores; a `17000` never gets reinterpreted. The official GAIA scorer is unchanged — no LLM judge, no partial credit, no answer rescue.
+3. **Tool routing.** Descriptions now route unambiguously: `calculate` claims *all* arithmetic and forbids the `run` tool for it; `run` deflects arithmetic to the calculator; `web_fetch` says it needs an exact URL and to search first. (The real run wasted calls running arithmetic through python3.)
+4. **Context management (`dev.axiom.agent.ContextWindow`).** Default 24,000-char tool-output cap, overridable via `-Daxiom.context.toolOutputCap=N`. Past the cap, the oldest tool outputs in the *model-facing view* become `[earlier output omitted: <tool> <N> chars]`; the newest two stay whole and the stored transcript/journal is never touched. (One task burned 673k tokens from pages compounding in context.)
+5. **Smart-model router (`dev.axiom.bench.gaia.ModelRouter`).** Free-tier triage: opt in with `AXIOM_BENCH_SMART_MODEL=gemini-3.8-flash` (or any model); tasks flagged heuristic-hard (question >350 chars, or multi-step keywords like "how many", "compare", "published between") run on the smart model. Budget via `AXIOM_BENCH_SMART_MODEL_BUDGET` (default 20 tasks; thread-safe, shared across workers). Per-model task/token counts are written into the receipt notes. This is a documented heuristic, not a guarantee — it cannot know which tasks are actually hard.
+6. **Attachment folder.** `GaiaMain --attachments <dir>`: files named `<taskId>-<original-name>` are matched to tasks by task-ID prefix, mounted into the task workspace with the prefix stripped, and those tasks move from UNATTEMPTED to attempted. 11 Level 1 tasks are attachment-gated; mounting user-supplied files is the only way to attempt them without the gated repo.
+
+Honest boundaries: repeated tuning against the same 42 tasks risks **overfitting** — these improvements generalize (search, context caps, tool routing) but a rising L1 number on the same set is not proof of generality; Level 2 and Level 3 validation are the future check. GAIA remains an unofficial measurement; the scorer is untouched; this release does not re-run anything against known answers.
+
 ## v0.11.1 — what's new
 
 Two genuine defects exposed by the first real GAIA L1 live run (11/42 passed, 3M tokens), both fixed in the framework rather than worked around:

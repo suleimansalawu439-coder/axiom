@@ -24,6 +24,18 @@ public final class AgentConfig {
     private final java.nio.file.Path journalRoot;
     private final List<Guardrail> guardrails;
     private final List<Consumer<AgentEvent>> eventListeners;
+    /**
+     * Names of terminal tools: invoking one ends the run immediately and
+     * commits its answer argument as the run's output. Empty when none are
+     * configured.
+     */
+    private final java.util.Set<String> terminalTools;
+    /**
+     * Cap on accumulated tool-observation characters sent to the model per
+     * turn; older observations are stubbed out (see {@link ContextWindow}).
+     * The stored transcript is never modified.
+     */
+    private final int toolOutputCharCap;
 
     private AgentConfig(Builder b) {
         this.client = b.client;
@@ -37,6 +49,8 @@ public final class AgentConfig {
         this.journalRoot = b.journalRoot;
         this.guardrails = List.copyOf(b.guardrails);
         this.eventListeners = List.copyOf(b.eventListeners);
+        this.terminalTools = java.util.Set.copyOf(b.terminalTools);
+        this.toolOutputCharCap = b.toolOutputCharCap;
     }
 
     public LlmClient client() { return client; }
@@ -61,6 +75,10 @@ public final class AgentConfig {
      */
     public List<Guardrail> guardrails() { return guardrails; }
     public List<Consumer<AgentEvent>> eventListeners() { return eventListeners; }
+    /** Names of tools whose invocation ends the run, committing an answer. */
+    public java.util.Set<String> terminalTools() { return terminalTools; }
+    /** Cap on tool-observation characters sent to the model per turn. */
+    public int toolOutputCharCap() { return toolOutputCharCap; }
 
     void emit(AgentEvent event) {
         for (Consumer<AgentEvent> l : eventListeners) {
@@ -89,6 +107,8 @@ public final class AgentConfig {
         private java.nio.file.Path journalRoot;
         private final List<Guardrail> guardrails = new ArrayList<>();
         private final List<Consumer<AgentEvent>> eventListeners = new ArrayList<>();
+        private final java.util.Set<String> terminalTools = new java.util.LinkedHashSet<>();
+        private int toolOutputCharCap = ContextWindow.toolOutputCap();
 
         public Builder withClient(LlmClient client) { this.client = client; return this; }
         public Builder withModel(String model) {
@@ -145,6 +165,30 @@ public final class AgentConfig {
         }
         public Builder onEvent(Consumer<AgentEvent> listener) {
             this.eventListeners.add(listener);
+            return this;
+        }
+        /**
+         * Declare terminal tools: when the model invokes one, the run ends
+         * immediately and the tool's {@code answer} argument (or its first
+         * argument) is committed as the run's output. Useful for eval
+         * harnesses where the agent must commit one clean answer instead of
+         * rambling in chat text. Output guardrails still apply to the
+         * committed answer.
+         */
+        public Builder withTerminalTools(String... names) {
+            this.terminalTools.addAll(List.of(names));
+            return this;
+        }
+        /**
+         * Cap on accumulated tool-observation characters sent to the model
+         * per turn (default {@link ContextWindow#DEFAULT_TOOL_OUTPUT_CAP},
+         * overridable with {@code -Daxiom.context.toolOutputCap=N}). Older
+         * observations are replaced with one-line stubs; the transcript and
+         * journal keep the full history.
+         */
+        public Builder withToolOutputCharCap(int n) {
+            if (n <= 0) throw new IllegalArgumentException("cap must be positive");
+            this.toolOutputCharCap = n;
             return this;
         }
 

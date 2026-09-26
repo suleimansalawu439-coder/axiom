@@ -128,7 +128,9 @@ public final class SubprocessTool {
      */
     @Tool(description = "Run a command in the sandboxed workspace. No shell is used: "
         + "pass the command as a list of arguments, e.g. [\"ls\", \"-la\"]. "
-        + "Stdout/stderr are captured and returned; long-running commands are killed on timeout.",
+        + "Stdout/stderr are captured and returned; long-running commands are killed on timeout. "
+        + "Use this for processing files and multi-step scripts. Do NOT use this for arithmetic "
+        + "— use a calculator tool instead: it is faster, exact, and needs no interpreter.",
         requiresApproval = true, timeoutSeconds = 120)
     public ExecResult run(
             @ToolParam(description = "Command and arguments, e.g. [\"ls\", \"-la\"]. "

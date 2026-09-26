@@ -27,6 +27,6 @@ if [ -z "$GEMINI_API_KEY" ]; then
   exit 2
 fi
 export AXIOM_BENCH_PROVIDER=gemini
-java -cp "axiom-0.11.0.jar:lib/*" dev.axiom.bench.gaia.GaiaMain --live
+java -cp "axiom-0.12.0.jar:lib/*" dev.axiom.bench.gaia.GaiaMain --live
 echo
 echo "Done. The receipt and report are in benchmarks/receipts/."

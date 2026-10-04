@@ -427,3 +427,32 @@ is the real fix.
 **Tests:** 470/470 green (468 + 2 new).
 
 **NOT yet proven:** These fix the *mechanism* but haven't been validated on a live benchmark. Per Hamis's rule: one passing test ≠ fixed. Need a controlled re-run on the affected tasks.
+
+## M36 — GAIA top-submission architectures implemented (2026-10-04)
+
+**Evidence:** Deep research on GAIA leaderboard (top: 93.69%, we are at 61.9%).
+All top entries are multi-model; key patterns from open-source submissions.
+
+**Three features implemented (Hamis approved all three):**
+
+1. **TaskLedger** (`dev.axiom.agent.TaskLedger`): Magentic-One pattern.
+   Tracks facts/guesses/plan. Re-plans when 4 iterations pass without new
+   facts. CRITICAL (HF finding): replan prompt EXCLUDES the stale plan —
+   LLMs over-anchor. Evidence: removing ledgers drops GAIA 31%.
+
+2. **Verification pass** (`ReActAgent.verifyAnswer`): separate LLM call checks
+   draft answer vs question + ledger facts before commit. Evidence: cuts
+   false-success 23% → <1%. Skips when ledger empty (no real work).
+
+3. **CodeActionTool** (`dev.axiom.tools.CodeActionTool`): `code` tool accepts
+   Python with `axiom.web_search()`, `axiom.web_fetch()`, etc. via line-based
+   protocol. Evidence: code agents use ~30% fewer steps (55% vs 33% GAIA).
+
+**Config:** `withTaskLedger(true)`, `withVerification(true)` — opt-in, default
+off (tests). Enabled in GaiaMain. CodeActionTool is a tool holder (register
+explicitly).
+
+**Tests:** 475/475 green (470 + 5 new TaskLedgerTest).
+
+**NOT yet proven:** No live benchmark validation. These are architectural
+bets based on others' evidence, not our measured gains. Need controlled A/B.

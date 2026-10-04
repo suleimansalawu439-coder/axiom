@@ -331,6 +331,10 @@ public final class GaiaMain {
                 .onEvent(events::add)
                 .withClient(taskClient)
                 .withTerminalTools("answer")
+                // GAIA research features (2026-10-04): Task Ledger + Verification.
+                // Evidence: ledger removal drops 31%; verification cuts false-success 23%→<1%.
+                .withTaskLedger(true)
+                .withVerification(true)
                 .withTools(
                     new GaiaTools.Files(root),
                     new GaiaTools.Calc(),

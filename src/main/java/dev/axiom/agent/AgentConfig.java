@@ -39,6 +39,8 @@ public final class AgentConfig {
     private final int stagnationRepeatLimit;
     private final int stagnationErrorLimit;
     private final int stagnationFruitlessLimit;
+    private final boolean taskLedgerEnabled;
+    private final boolean verificationEnabled;
 
     private AgentConfig(Builder b) {
         this.client = b.client;
@@ -57,6 +59,8 @@ public final class AgentConfig {
         this.stagnationRepeatLimit = b.stagnationRepeatLimit;
         this.stagnationErrorLimit = b.stagnationErrorLimit;
         this.stagnationFruitlessLimit = b.stagnationFruitlessLimit;
+        this.taskLedgerEnabled = b.taskLedgerEnabled;
+        this.verificationEnabled = b.verificationEnabled;
     }
 
     public LlmClient client() { return client; }
@@ -88,6 +92,8 @@ public final class AgentConfig {
     public int stagnationRepeatLimit() { return stagnationRepeatLimit; }
     public int stagnationErrorLimit() { return stagnationErrorLimit; }
     public int stagnationFruitlessLimit() { return stagnationFruitlessLimit; }
+    public boolean taskLedgerEnabled() { return taskLedgerEnabled; }
+    public boolean verificationEnabled() { return verificationEnabled; }
 
     void emit(AgentEvent event) {
         for (Consumer<AgentEvent> l : eventListeners) {
@@ -126,6 +132,10 @@ public final class AgentConfig {
         private int stagnationRepeatLimit = 3;
         private int stagnationErrorLimit = 4;
         private int stagnationFruitlessLimit = 6;
+        // GAIA research features (2026-10-04): Task Ledger, Verification Pass,
+        // Code-as-Action. Disabled by default (tests); enable via withXxx(true).
+        private boolean taskLedgerEnabled = false;
+        private boolean verificationEnabled = false;
 
         public Builder withClient(LlmClient client) { this.client = client; return this; }
         public Builder withModel(String model) {
@@ -167,6 +177,8 @@ public final class AgentConfig {
             this.stagnationFruitlessLimit = fruitlessLimit;
             return this;
         }
+        public Builder withTaskLedger(boolean enabled) { this.taskLedgerEnabled = enabled; return this; }
+        public Builder withVerification(boolean enabled) { this.verificationEnabled = enabled; return this; }
         public Builder withTemperature(double t) { this.temperature = t; return this; }
         public Builder withApprovalHandler(ApprovalHandler h) { this.approvalHandler = h; return this; }
         public Builder withMemory(Memory memory) { this.memory = memory; return this; }

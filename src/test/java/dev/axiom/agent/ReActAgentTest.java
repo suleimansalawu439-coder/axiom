@@ -249,6 +249,18 @@ class ReActAgentTest {
     }
 
     @Test
+    void stripFormattingCruftRemovesLeakedToolCallXml() {
+        // 2026-10-04: Qwen GAIA failures — 46719c30 (<tool_call>),
+        // cf106601 (<｜DSML｜>) failed on exact match with XML in output.
+        assertEquals("Wojciech",
+            ReActAgent.stripFormattingCruft("<tool_call>Wojciech</tool_call>"));
+        assertEquals("answer",
+            ReActAgent.stripFormattingCruft("answer <｜DSML｜>noise</｜DSML｜>"));
+        assertEquals("clean",
+            ReActAgent.stripFormattingCruft("<tool_call>clean"));
+    }
+
+    @Test
     void isProseAnswerDetectsThinking() {
         // Third-person self-reference
         assertTrue(ReActAgent.isProseAnswer(

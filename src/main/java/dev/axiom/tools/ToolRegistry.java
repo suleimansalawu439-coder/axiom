@@ -94,8 +94,18 @@ public final class ToolRegistry {
         if (def == null) {
             throw new ToolInvocationException("Unknown tool: '" + name + "'. Available: " + tools.keySet());
         }
+        // Fix 2026-10-04: some models wrap args as {"arguments": {...}}.
+        // Evidence: Qwen GAIA run — 3 tasks destroyed by this (5d0080cb: 4 errors,
+        // c365c1c7: 2 errors, cf106601: 8 errors). Unwrap instead of failing.
+        Map<String, Object> args = arguments;
+        if (args != null && args.size() == 1 && args.containsKey("arguments")
+                && args.get("arguments") instanceof Map) {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> inner = (Map<String, Object>) args.get("arguments");
+            args = inner;
+        }
         try {
-            return def.invoker().invoke(arguments);
+            return def.invoker().invoke(args);
         } catch (ToolInvocationException e) {
             throw e;
         } catch (Exception e) {

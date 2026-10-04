@@ -414,3 +414,16 @@ is the real fix.
 7. [ ] Am I removing a guardrail? → A/B first, burden of proof on removal.
 8. [ ] 0-token results in the output? → infra aborts, never scored.
 9. [ ] After the run: `git status` — no hand-patched jars; `mvn package` rebuilds clean.
+
+## M35 — P0 harness fixes from Qwen failure traces (2026-10-04)
+
+**Evidence:** Subagent analyzed all 16 Qwen GAIA failures from iteration traces (not outputs). Report: `qwen-failure-analysis-20261004.md`.
+
+**Three P0 fixes implemented (one variable each, tests added):**
+1. **ToolRegistry unwraps `{"arguments": {...}}`** — Qwen wrapped args, harness rejected them. 3 tasks destroyed (5d0080cb: 4 errors, c365c1c7: 2 errors, cf106601: 8 errors). 5-line fix in `invoke()`.
+2. **stripFormattingCruft extracts from `<tool_call>`/`<｜DSML｜>` XML** — 46719c30 and cf106601 failed on exact match with XML in output. Note: ｜ is U+FF5C fullwidth, not ASCII pipe.
+3. **Never return empty** — closing call now falls back to `extractLastSubstantiveText()` (last assistant message >10 chars) if blank even after forced retry. 7673d772 and c365c1c7 failed empty.
+
+**Tests:** 470/470 green (468 + 2 new).
+
+**NOT yet proven:** These fix the *mechanism* but haven't been validated on a live benchmark. Per Hamis's rule: one passing test ≠ fixed. Need a controlled re-run on the affected tasks.

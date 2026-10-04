@@ -526,6 +526,13 @@ public final class ReActAgent {
                 closingContent = retry.content();
             }
         }
+        // Fix 2026-10-04: never return empty. Evidence: Qwen GAIA run —
+        // 7673d772 and c365c1c7 failed with empty output. If still blank
+        // after retry, extract the last substantive model text as a
+        // best-effort answer rather than guaranteeing failure.
+        if (closingContent == null || closingContent.isBlank()) {
+            closingContent = extractLastSubstantiveText(state.messages());
+        }
         if (isProseAnswer(closingContent)) {
             closingContent = extractBareAnswer(state.messages(), closingContent,
                 config.maxIterations() + 1);
@@ -689,9 +696,35 @@ public final class ReActAgent {
         }
     }
 
+    /** The value a terminal tool commits: its {@code answer} argument, else its first argument. */
+    private static String committedAnswer(ToolCallRequest call) {
+        Map<String, Object> args = call.arguments();
+        if (args == null || args.isEmpty()) return "";
+        Object v = args.containsKey("answer") ? args.get("answer")
+            : args.values().iterator().next();
+        return v == null ? "" : String.valueOf(v);
+    }
+
     /** Strip known formatting cruft: screenplay sluglines, quotes, etc. */
     static String stripFormattingCruft(String s) {
         String t = s.trim();
+        // Fix 2026-10-04: strip leaked tool-call XML from final answers.
+        // Evidence: Qwen GAIA run — 46719c30 had <tool_call> XML in output,
+        // cf106601 had <｜DSML｜> XML in output. Both failed on exact match.
+        // Note: ｜ is U+FF5C FULLWIDTH VERTICAL LINE, not ASCII pipe.
+        var wrapped = java.util.regex.Pattern.compile(
+            "^<[｜|]?DSML[｜|]?>(.*?)</[｜|]?DSML[｜|]?>$",
+            java.util.regex.Pattern.DOTALL).matcher(t);
+        if (wrapped.matches()) t = wrapped.group(1).trim();
+        wrapped = java.util.regex.Pattern.compile(
+            "^<tool_call>(.*?)</tool_call>$",
+            java.util.regex.Pattern.DOTALL).matcher(t);
+        if (wrapped.matches()) t = wrapped.group(1).trim();
+        // Otherwise strip stray tags.
+        t = t.replaceAll("<[｜|]?DSML[｜|]?>.*?</[｜|]?DSML[｜|]?>", "").trim();
+        t = t.replaceAll("<tool_call>.*?</tool_call>", "").trim();
+        t = t.replaceAll("<[｜|]?DSML[｜|]?>", "").replaceAll("</[｜|]?DSML[｜|]?>", "").trim();
+        t = t.replaceAll("<tool_call>", "").replaceAll("</tool_call>", "").trim();
         // Screenplay slugline: "INT. THE CASTLE - DAY" → "THE CASTLE"
         var m = java.util.regex.Pattern.compile(
             "^(INT|EXT)\\.\\s*(.+?)\\s*-\\s*(DAY|NIGHT|DUSK|DAWN)$",
@@ -704,13 +737,22 @@ public final class ReActAgent {
         return t;
     }
 
-    /** The value a terminal tool commits: its {@code answer} argument, else its first argument. */
-    private static String committedAnswer(ToolCallRequest call) {
-        Map<String, Object> args = call.arguments();
-        if (args == null || args.isEmpty()) return "";
-        Object v = args.containsKey("answer") ? args.get("answer")
-            : args.values().iterator().next();
-        return v == null ? "" : String.valueOf(v);
+    /**
+     * Last-resort answer extraction: walk the conversation backwards and
+     * return the last substantive assistant text. Used when the closing
+     * call returns blank even after a forced retry — a guess beats a
+     * guaranteed-empty failure.
+     */
+    private static String extractLastSubstantiveText(java.util.List<ChatMessage> messages) {
+        for (int i = messages.size() - 1; i >= 0; i--) {
+            ChatMessage msg = messages.get(i);
+            if (msg.role() == ChatRole.ASSISTANT
+                    && msg.content() != null && !msg.content().isBlank()
+                    && msg.content().trim().length() > 10) {
+                return stripFormattingCruft(msg.content());
+            }
+        }
+        return "";
     }
 
     /** One model turn plus whether its tool calls were all dropped as malformed. */

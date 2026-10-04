@@ -8,3 +8,4 @@ lib/
 benchmarks/receipts/
 benchmarks/resumable/
 *.receipt.json
+exp-jars/

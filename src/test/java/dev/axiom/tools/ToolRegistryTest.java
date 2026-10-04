@@ -94,4 +94,13 @@ class ToolRegistryTest {
         var r = new ToolRegistry().register(new SampleTools());
         assertThrows(IllegalStateException.class, () -> r.register(new Dup()));
     }
+
+    @Test
+    void invokeUnwrapsArgumentsWrapper() {
+        // 2026-10-04: Qwen wrapped args as {"arguments": {...}} — 3 GAIA
+        // tasks destroyed (5d0080cb, c365c1c7, cf106601). Unwrap, don't fail.
+        var result = registry().invoke("greet_user",
+            Map.of("arguments", Map.of("name", "Hamis")));
+        assertEquals("Hello, Hamis", result);
+    }
 }

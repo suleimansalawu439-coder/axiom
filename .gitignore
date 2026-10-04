@@ -5,3 +5,6 @@ lib/
 .vscode/
 *.class
 *.log
+benchmarks/receipts/
+benchmarks/resumable/
+*.receipt.json

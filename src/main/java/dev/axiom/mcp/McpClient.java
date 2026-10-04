@@ -274,10 +274,17 @@ public final class McpClient implements AutoCloseable {
     }
 
     /** Reader loop: correlates responses by id, answers server requests, ignores notifications. */
+    /** Maximum line length (1 MB). Prevents memory exhaustion from hostile servers. */
+    private static final int MAX_LINE_CHARS = 1_000_000;
+    /** Maximum content blocks per tool result. */
+    private static final int MAX_CONTENT_BLOCKS = 100;
+    /** Maximum aggregate response bytes (10 MB). */
+    private static final int MAX_RESPONSE_BYTES = 10_000_000;
+
     private void readLoop() {
         try {
             String line;
-            while ((line = reader.readLine()) != null) {
+            while ((line = readBoundedLine()) != null) {
                 if (line.isBlank()) continue;
                 JsonNode msg;
                 try {
@@ -295,6 +302,26 @@ public final class McpClient implements AutoCloseable {
             pending.forEach((id, f) -> f.completeExceptionally(end));
             pending.clear();
         }
+    }
+
+    /**
+     * Read a line with a length cap. Returns null on EOF.
+     * Throws IOException if the line exceeds MAX_LINE_CHARS.
+     */
+    private String readBoundedLine() throws IOException {
+        StringBuilder sb = new StringBuilder();
+        int c;
+        while ((c = reader.read()) != -1) {
+            if (c == '\n') break;
+            if (c == '\r') continue;
+            sb.append((char) c);
+            if (sb.length() > MAX_LINE_CHARS) {
+                throw new IOException(
+                    "MCP server sent line exceeding " + MAX_LINE_CHARS + " chars; aborting");
+            }
+        }
+        if (c == -1 && sb.length() == 0) return null;
+        return sb.toString();
     }
 
     private void dispatch(JsonNode msg) {

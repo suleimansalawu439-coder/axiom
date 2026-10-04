@@ -3,6 +3,7 @@ package dev.axiom.bench.gaia;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.axiom.capabilities.Capability;
+import dev.axiom.llm.ProxyConfig;
 import dev.axiom.tools.Tool;
 import dev.axiom.tools.ToolParam;
 
@@ -63,10 +64,11 @@ public final class WebSearchTool {
     }
 
     private static String defaultGet(String url) throws Exception {
-        HttpClient client = HttpClient.newBuilder()
+        HttpClient.Builder builder = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(15))
-            .followRedirects(HttpClient.Redirect.NORMAL)
-            .build();
+            .followRedirects(HttpClient.Redirect.NORMAL);
+        ProxyConfig.configureClient(builder);
+        HttpClient client = builder.build();
         HttpRequest req = HttpRequest.newBuilder(URI.create(url))
             .timeout(Duration.ofSeconds(30))
             .header("User-Agent",
@@ -97,6 +99,10 @@ public final class WebSearchTool {
         if (query == null || query.isBlank()) {
             return "ERROR: empty search query";
         }
+        // Wikipedia first; general web (DDG) only when Wikipedia is empty.
+        // (2026-10-02: interleaving both backends was tried — it flipped
+        // 2 tasks to PASS but regressed 2 others to FAIL. Net wash with
+        // added volatility. Reverted to the stable fallback logic.)
         try {
             List<Result> results = wikipediaSearch(query);
             String source = "Wikipedia";

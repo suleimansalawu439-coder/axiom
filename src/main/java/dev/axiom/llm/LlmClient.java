@@ -18,6 +18,16 @@ public interface LlmClient {
     String model();
 
     /**
+     * Endpoint identity for cache namespacing. Two clients with different
+     * endpoints must not share cache entries, even for identical requests.
+     * Defaults to the implementation class name; providers with configurable
+     * base URLs should override to return the URL.
+     */
+    default String endpointId() {
+        return getClass().getName();
+    }
+
+    /**
      * @param temperature    sampling temperature
      * @param maxTokens      max completion tokens
      * @param jsonSchema     if non-null, the model must respond with JSON matching

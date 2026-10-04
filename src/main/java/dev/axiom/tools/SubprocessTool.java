@@ -10,7 +10,8 @@ import java.util.*;
 import java.util.concurrent.TimeUnit;
 
 /**
- * A {@code @Tool} holder that executes subprocesses inside a sandbox:
+ * A {@code @Tool} holder that executes subprocesses with cwd confinement
+ * (NOT a filesystem sandbox):
  *
  * <ul>
  *   <li><b>No shell.</b> The command is an argv list passed straight to
@@ -19,6 +20,12 @@ import java.util.concurrent.TimeUnit;
  *   <li><b>Working-directory confinement.</b> The process runs with its cwd
  *       inside {@code root}; an executable path containing separators must
  *       resolve inside {@code root} (path traversal is rejected).</li>
+ *   <li><b>NOT a filesystem sandbox.</b> Arguments are passed unchanged to
+ *       the process. A command like {@code python3} or {@code cat} can
+ *       read files outside {@code root} via absolute paths or {@code ..}
+ *       in arguments. For true isolation, run in a container/VM with a
+ *       read-only host filesystem. Treat interpreter commands as
+ *       privileged.</li>
  *   <li><b>Environment allowlist.</b> The child inherits only allowlisted
  *       variables — secrets in the parent environment never leak in.</li>
  *   <li><b>Optional command allowlist.</b> Restrict which executables may run

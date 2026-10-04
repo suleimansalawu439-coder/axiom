@@ -11,6 +11,7 @@ import dev.axiom.guardrails.Verdict;
 import dev.axiom.llm.*;
 import dev.axiom.output.OutputSchema;
 import dev.axiom.output.StructuredOutputException;
+import dev.axiom.tools.ToolCallRepair;
 import dev.axiom.tools.ToolDefinition;
 import dev.axiom.tools.ToolInvocationException;
 import dev.axiom.tools.ToolRegistry;
@@ -25,6 +26,7 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Optional;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.*;
@@ -54,11 +56,26 @@ public final class ReActAgent {
     private RunJournal journal;
 
     /** Daemon pool so runaway tools never pin the JVM. */
-    private static final ExecutorService TOOL_POOL = Executors.newCachedThreadPool(r -> {
-        Thread t = new Thread(r, "axiom-tool");
-        t.setDaemon(true);
-        return t;
-    });
+    /**
+     * Bounded pool for tool execution. The bound prevents a flood of
+     * timed-out tools from creating unbounded threads. Note: Java
+     * interruption is cooperative — {@code future.cancel(true)} requests
+     * interruption, but a tool that ignores interrupts will continue
+     * running until it finishes or the JVM exits. Tool timeouts are
+     * therefore a best-effort deadline, not a guarantee of termination.
+     * For untrusted tools, use process-level isolation instead.
+     */
+    private static final ExecutorService TOOL_POOL =
+        new java.util.concurrent.ThreadPoolExecutor(
+            0, 32, // core 0, max 32 threads
+            60L, java.util.concurrent.TimeUnit.SECONDS,
+            new java.util.concurrent.SynchronousQueue<>(),
+            r -> {
+                Thread t = new Thread(r, "axiom-tool");
+                t.setDaemon(true);
+                return t;
+            },
+            new java.util.concurrent.ThreadPoolExecutor.CallerRunsPolicy());
 
     public ReActAgent(AgentConfig config) {
         this.config = config;
@@ -144,7 +161,8 @@ public final class ReActAgent {
 
     private record LoopState(List<ChatMessage> messages, int iteration,
                              ChatResponse.TokenUsage totalUsage, int toolCallsMade,
-                             Map<String, String> replayedResults) {}
+                             Map<String, String> replayedResults,
+                             int consecutiveBlanks) {}
 
     private RunWithTranscript runWithTranscript(String task) {
         String screened = applyInputGuardrails(task);
@@ -162,7 +180,7 @@ public final class ReActAgent {
         messages.add(ChatMessage.user(screened));
 
         LoopState state = new LoopState(messages, 0,
-            ChatResponse.TokenUsage.empty(), 0, Map.of());
+            ChatResponse.TokenUsage.empty(), 0, Map.of(), 0);
         AgentResult result = runLoop(state);
         persistMemory(messages);
         return new RunWithTranscript(result, List.copyOf(messages));
@@ -209,7 +227,7 @@ public final class ReActAgent {
             return new ResumedRun(terminal, List.copyOf(messages));
         }
         LoopState state = new LoopState(messages, t.lastIteration(), t.totalUsage(),
-            toolCallsMade, t.recordedResults());
+            toolCallsMade, t.recordedResults(), 0);
         AgentResult result = runLoop(state);
         persistMemory(messages);
         return new ResumedRun(result, List.copyOf(messages));
@@ -257,27 +275,48 @@ public final class ReActAgent {
 
         int iteration = completedIterations + 1;
         emit(new AgentEvent.LlmRequest(Instant.now(), iteration));
-        emit(new AgentEvent.LlmResponse(Instant.now(), iteration, pendingResponse));
-        ChatResponse.TokenUsage totalUsage = usageSoFar.add(pendingResponse.usage());
-        chargeBudget(pendingResponse.usage());
+        // The pending turn is repaired like any live turn: a blank or
+        // mangled name is re-attributed, an unrecoverable blank name is
+        // dropped so it can never reach dispatch or provider history.
+        // The journal records the repaired turn, matching doChat.
+        RepairedTurn repairedTurn = repairToolCalls(pendingResponse);
+        ChatResponse pendingResponseRepaired = repairedTurn.response();
+        emit(new AgentEvent.LlmResponse(Instant.now(), iteration, pendingResponseRepaired));
+        ChatResponse.TokenUsage totalUsage = usageSoFar.add(pendingResponseRepaired.usage());
+        chargeBudget(pendingResponseRepaired.usage());
 
         int toolCallsMade = toolCallsMadeSoFar;
-        if (!pendingResponse.hasToolCalls()) {
-            String answer = applyOutputGuardrails(pendingResponse.content());
-            AgentResult result = new AgentResult(
-                answer, iteration, toolCallsMade, totalUsage, true);
-            emit(new AgentEvent.RunFinished(Instant.now(), result));
-            messages.add(ChatMessage.assistant(answer));
-            return result;
+        if (!pendingResponseRepaired.hasToolCalls()) {
+            if (!repairedTurn.allCallsDropped()
+                    && pendingResponseRepaired.content() != null
+                    && !pendingResponseRepaired.content().isBlank()) {
+                String content = pendingResponseRepaired.content();
+                if (isProseAnswer(content)) {
+                    content = extractBareAnswer(messages, content, iteration);
+                }
+                String answer = applyOutputGuardrails(content);
+                AgentResult result = new AgentResult(
+                    answer, iteration, toolCallsMade, totalUsage, true);
+                emit(new AgentEvent.RunFinished(Instant.now(), result));
+                messages.add(ChatMessage.assistant(answer));
+                return result;
+            }
+            // Blank narration or a turn whose calls were all dropped is not
+            // an answer: nudge and continue the loop for a fresh model turn
+            // instead of committing the placeholder (or "").
+            messages.add(ChatMessage.user(
+                "You returned no usable tool calls and no text. Please continue: " +
+                "call a tool to gather more information, or provide your final answer as text."));
+        } else {
+            messages.add(ChatMessage.assistantWithToolCalls(
+                pendingResponseRepaired.content(), pendingResponseRepaired.toolCalls()));
+            for (ToolCallRequest call : pendingResponseRepaired.toolCalls()) {
+                toolCallsMade++;
+                String observation = executeToolCall(call, config.tools(), Map.of());
+                messages.add(ChatMessage.toolResult(call.id(), call.name(), observation));
+            }
         }
-        messages.add(ChatMessage.assistantWithToolCalls(
-            pendingResponse.content(), pendingResponse.toolCalls()));
-        for (ToolCallRequest call : pendingResponse.toolCalls()) {
-            toolCallsMade++;
-            String observation = executeToolCall(call, config.tools(), Map.of());
-            messages.add(ChatMessage.toolResult(call.id(), call.name(), observation));
-        }
-        return runLoop(new LoopState(messages, iteration, totalUsage, toolCallsMade, Map.of()));
+        return runLoop(new LoopState(messages, iteration, totalUsage, toolCallsMade, Map.of(), 0));
     }
 
     /**
@@ -312,9 +351,13 @@ public final class ReActAgent {
                     && ev.event() instanceof AgentEvent.LlmResponse lr) {
                 lastIteration = lr.iteration();
                 totalUsage = totalUsage.add(lr.response().usage());
+                // Sanitize without emitting: replay must not produce events,
+                // and legacy journals (pre repair) may carry blank names that
+                // must never be re-dispatched on resume.
+                RepairedTurn repaired = repairTurn(lr.response(), config.tools());
                 messages.add(ChatMessage.assistantWithToolCalls(
-                    lr.response().content(), lr.response().toolCalls()));
-                pending = new ArrayList<>(lr.response().toolCalls());
+                    repaired.response().content(), repaired.response().toolCalls()));
+                pending = new ArrayList<>(repaired.response().toolCalls());
             } else if (record instanceof RunJournal.Event ev2
                     && ev2.event() instanceof AgentEvent.ToolCallFinished tf) {
                 // Legacy journals (pre side-effect ledger): a finished event
@@ -356,14 +399,79 @@ public final class ReActAgent {
         List<ToolDefinition> toolDefs = List.copyOf(registry.all());
         LlmClient.LlmOptions options =
             new LlmClient.LlmOptions(config.temperature(), 4096);
+        // Model-agnostic runaway guard: mechanical signals (exact repeats,
+        // error streaks, fruitless iterations), never model identity.
+        StagnationController stagnation = new StagnationController(
+            config.stagnationRepeatLimit(), config.stagnationErrorLimit(),
+            config.stagnationFruitlessLimit());
 
         for (int iteration = state.iteration() + 1; iteration <= config.maxIterations(); iteration++) {
-            ChatResponse response = doChat(state.messages(), toolDefs, options, iteration);
+            Turn turn = doChat(state.messages(), toolDefs, options, iteration);
+            ChatResponse response = turn.response();
             ChatResponse.TokenUsage totalUsage = state.totalUsage().add(response.usage());
             chargeBudget(response.usage());
 
+            if (turn.allCallsDropped()) {
+                // Every tool call was malformed and dropped: the turn's
+                // narration text (e.g. "using a tool") is NOT an answer and
+                // must never be committed as one. Nudge the model to
+                // continue instead. Bounded by maxIterations and the
+                // stagnation controller (counts as a fruitless turn).
+                state.messages().add(ChatMessage.user(
+                    "All of your tool calls were malformed and have been dropped. " +
+                    "Please continue: call a valid tool to gather more information, " +
+                    "or provide your final answer as text."));
+                stagnation.record(List.of(), List.of());
+                Optional<String> stagnated = stagnation.shouldStop();
+                if (stagnated.isPresent()) {
+                    emit(new AgentEvent.StagnationStopped(Instant.now(), stagnated.get()));
+                    break;
+                }
+                state = new LoopState(state.messages(), iteration, totalUsage,
+                    state.toolCallsMade(), state.replayedResults(), 0);
+                continue;
+            }
+
             if (!response.hasToolCalls()) {
-                String answer = applyOutputGuardrails(response.content());
+                String content = response.content();
+                if (content == null || content.isBlank()) {
+                    // The model returned neither tool calls nor text. Committing
+                    // an empty string here is a guaranteed failure — nudge the
+                    // model to continue instead. Bounded by maxIterations and
+                    // the stagnation controller (counts as a fruitless turn).
+                    //
+                    // After 2 consecutive blanks, the gentle nudge is not
+                    // working — switch to a FORCED answer demand. A best-effort
+                    // guess beats a guaranteed-empty failure.
+                    int blanks = state.consecutiveBlanks() + 1;
+                    String nudge;
+                    if (blanks >= 3) {
+                        nudge = "You have returned blank responses repeatedly. "
+                            + "You MUST now provide your best answer as text. "
+                            + "Do not return blank. Give your best-supported guess "
+                            + "based on what you have learned so far.";
+                    } else {
+                        nudge = "You returned no tool calls and no text. Please continue: "
+                            + "call a tool to gather more information, or provide your final answer as text.";
+                    }
+                    state.messages().add(ChatMessage.user(nudge));
+                    stagnation.record(List.of(), List.of());
+                    Optional<String> stagnated = stagnation.shouldStop();
+                    if (stagnated.isPresent()) {
+                        emit(new AgentEvent.StagnationStopped(Instant.now(), stagnated.get()));
+                        break;
+                    }
+                    state = new LoopState(state.messages(), iteration, totalUsage,
+                        state.toolCallsMade(), state.replayedResults(), blanks);
+                    continue;
+                }
+                // Prose-like terminal text gets the same hygiene pass as the
+                // answer-tool path: extract the bare value from the model's
+                // own draft. Short answers skip this entirely.
+                if (isProseAnswer(content)) {
+                    content = extractBareAnswer(state.messages(), content, iteration);
+                }
+                String answer = applyOutputGuardrails(content);
                 AgentResult result = new AgentResult(
                     answer, iteration, state.toolCallsMade(), totalUsage, true);
                 emit(new AgentEvent.RunFinished(Instant.now(), result));
@@ -374,24 +482,55 @@ public final class ReActAgent {
             state.messages().add(ChatMessage.assistantWithToolCalls(response.content(), response.toolCalls()));
 
             int toolCallsMade = state.toolCallsMade();
+            List<String> observations = new ArrayList<>(response.toolCalls().size());
             for (ToolCallRequest call : response.toolCalls()) {
                 toolCallsMade++;
                 String observation = executeToolCall(call, registry, state.replayedResults());
+                observations.add(observation);
                 state.messages().add(ChatMessage.toolResult(call.id(), call.name(), observation));
             }
             AgentResult terminal = terminalResult(response.toolCalls(), state.messages(),
                 iteration, toolCallsMade, totalUsage);
             if (terminal != null) return terminal;
+            // Stagnation is checked after the terminal commit: a terminal
+            // answer is progress, not stagnation.
+            stagnation.record(response.toolCalls(), observations);
+            Optional<String> stagnated = stagnation.shouldStop();
+            if (stagnated.isPresent()) {
+                emit(new AgentEvent.StagnationStopped(Instant.now(), stagnated.get()));
+                break;
+            }
             state = new LoopState(state.messages(), iteration, totalUsage, toolCallsMade,
-                state.replayedResults());
+                state.replayedResults(), 0);
         }
 
         // Out of iterations: ask for a best-effort final answer with no tools.
         ChatResponse closing = doChat(withClosingInstruction(state.messages()), List.of(),
-            options, config.maxIterations() + 1);
+            options, config.maxIterations() + 1).response();
         ChatResponse.TokenUsage totalUsage = state.totalUsage().add(closing.usage());
         chargeBudget(closing.usage());
-        String answer = applyOutputGuardrails(closing.content());
+        String closingContent = closing.content();
+        // If the closing call returns blank, retry once with a forced demand.
+        // Blank here is a guaranteed failure; a retry cannot make it worse.
+        if (closingContent == null || closingContent.isBlank()) {
+            List<ChatMessage> forcedMessages = new ArrayList<>(state.messages());
+            forcedMessages.add(ChatMessage.user(
+                "You MUST provide your best final answer now as text. Do not "
+                + "return blank. Give your best-supported guess based on what "
+                + "you learned."));
+            ChatResponse retry = doChat(forcedMessages, List.of(),
+                options, config.maxIterations() + 2).response();
+            totalUsage = totalUsage.add(retry.usage());
+            chargeBudget(retry.usage());
+            if (retry.content() != null && !retry.content().isBlank()) {
+                closingContent = retry.content();
+            }
+        }
+        if (isProseAnswer(closingContent)) {
+            closingContent = extractBareAnswer(state.messages(), closingContent,
+                config.maxIterations() + 1);
+        }
+        String answer = applyOutputGuardrails(closingContent);
         AgentResult result = new AgentResult(
             answer, config.maxIterations(), state.toolCallsMade(), totalUsage, false);
         emit(new AgentEvent.RunFinished(Instant.now(), result));
@@ -421,8 +560,27 @@ public final class ReActAgent {
     }
 
     /** Same contract as {@link #applyInputGuardrails}, for the final answer. */
+    /**
+     * Strips a single-entry map stringification from a terminal answer.
+     * Some models emit {@code {answer=value}} instead of {@code value};
+     * this unwraps it mechanically. Only the exact {@code {answer=...}}
+     * shape is touched; anything else passes through unchanged.
+     */
+    static String unwrapAnswerWrapper(String answer) {
+        if (answer == null) return "";
+        String t = answer.trim();
+        if (t.startsWith("{answer=") && t.endsWith("}")) {
+            return t.substring("{answer=".length(), t.length() - 1).trim();
+        }
+        return answer;
+    }
+
     private String applyOutputGuardrails(String answer) {
         String current = answer == null ? "" : answer;
+        // Mechanical format normalization (not a content change): models
+        // sometimes stringify a map, e.g. "{answer=Braintree, Honolulu}".
+        // Unwrap the single-entry form so the scorer sees the value.
+        current = unwrapAnswerWrapper(current);
         for (Guardrail g : config.guardrails()) {
             Verdict v = g.checkOutput(current);
             if (v instanceof Verdict.Block b) {
@@ -455,6 +613,14 @@ public final class ReActAgent {
         for (ToolCallRequest call : calls) {
             if (!config.terminalTools().contains(call.name())) continue;
             String committed = committedAnswer(call);
+            if (isProseAnswer(committed)) {
+                // Model-agnostic answer hygiene: some models put explanation
+                // in the terminal answer despite the tool contract. One
+                // constrained pass extracts the bare value from the model's
+                // OWN draft — formatting, never reinterpretation. Short
+                // answers skip this entirely.
+                committed = extractBareAnswer(messages, committed, iteration);
+            }
             String answer = applyOutputGuardrails(committed);
             AgentResult result = new AgentResult(
                 answer, iteration, toolCallsMade, totalUsage, true);
@@ -463,6 +629,79 @@ public final class ReActAgent {
             return result;
         }
         return null;
+    }
+
+    /** Heuristic: does the terminal value look like prose rather than a bare answer? */
+    static boolean isProseAnswer(String answer) {
+        if (answer == null) return false;
+        String t = answer.trim();
+        if (t.isEmpty()) return false;
+        int words = t.split("\\s+").length;
+        if (t.length() > 120 || t.contains("\n") || words > 25) return true;
+        // Short thinking outputs: third-person self-reference, meta-commentary,
+        // or incomplete (unclosed quote, ends mid-thought).
+        String low = t.toLowerCase();
+        if (low.contains("when the agent") || low.contains("the agent was asked")
+            || low.startsWith("based on my research") || low.startsWith("i found that")
+            || low.startsWith("according to my")) return true;
+        // Unclosed quote: odd number of double-quotes means the model was
+        // cut off mid-quotation (e.g. page header, not an answer).
+        if (t.chars().filter(c -> c == '"').count() % 2 == 1) return true;
+        if (t.endsWith(":") || t.endsWith(" for") || t.endsWith(" the")
+            || t.endsWith(" a") || t.endsWith(" to")) return true;
+        return false;
+    }
+
+    /** The task as originally posed: the first user message in the transcript. */
+    private static String originalQuestion(List<ChatMessage> messages) {
+        for (ChatMessage m : messages) {
+            if (m.role() == ChatRole.USER && m.content() != null && !m.content().isBlank()) {
+                return m.content();
+            }
+        }
+        return "";
+    }
+
+    /**
+     * Best-effort extraction of the bare answer value from a prose-like
+     * terminal draft. Falls back to the draft when the extraction call
+     * fails or returns nothing.
+     */
+    private String extractBareAnswer(List<ChatMessage> messages, String draft, int iteration) {
+        List<ChatMessage> m = List.of(ChatMessage.user(
+            "The agent was asked:\n" + originalQuestion(messages)
+            + "\n\nIts draft final answer was:\n" + draft
+            + "\n\nReply with ONLY the final answer value: a short string, a number, "
+            + "or a comma-separated list. No explanation, no preamble, no quotes. "
+            + "Strip formatting cruft: e.g. 'INT. THE CASTLE - DAY' → 'THE CASTLE', "
+            + "'\"quoted\"' → 'quoted'."));
+        try {
+            ChatResponse r = doChat(m, List.of(),
+                new LlmClient.LlmOptions(config.temperature(), 256), iteration + 1).response();
+            chargeBudget(r.usage());
+            String extracted = r.content() == null ? "" : r.content().trim();
+            if (extracted.isEmpty()) return draft;
+            // Regex fallback for common formatting the LLM might miss.
+            extracted = stripFormattingCruft(extracted);
+            return extracted.isEmpty() ? draft : extracted;
+        } catch (Exception e) {
+            return draft;
+        }
+    }
+
+    /** Strip known formatting cruft: screenplay sluglines, quotes, etc. */
+    static String stripFormattingCruft(String s) {
+        String t = s.trim();
+        // Screenplay slugline: "INT. THE CASTLE - DAY" → "THE CASTLE"
+        var m = java.util.regex.Pattern.compile(
+            "^(INT|EXT)\\.\\s*(.+?)\\s*-\\s*(DAY|NIGHT|DUSK|DAWN)$",
+            java.util.regex.Pattern.CASE_INSENSITIVE).matcher(t);
+        if (m.matches()) return m.group(2).trim();
+        // Balanced quotes
+        if (t.length() >= 2 && t.startsWith("\"") && t.endsWith("\"")) {
+            return t.substring(1, t.length() - 1).trim();
+        }
+        return t;
     }
 
     /** The value a terminal tool commits: its {@code answer} argument, else its first argument. */
@@ -474,13 +713,16 @@ public final class ReActAgent {
         return v == null ? "" : String.valueOf(v);
     }
 
+    /** One model turn plus whether its tool calls were all dropped as malformed. */
+    private record Turn(ChatResponse response, boolean allCallsDropped) {}
+
     /**
      * One model turn. Uses streaming when the client supports it — tokens are
      * emitted as {@link AgentEvent.StreamToken} for live UIs — but always
      * returns the complete turn before the agent acts on it.
      */
-    private ChatResponse doChat(List<ChatMessage> messages, List<ToolDefinition> tools,
-                                LlmClient.LlmOptions options, int iteration) {
+    private Turn doChat(List<ChatMessage> messages, List<ToolDefinition> tools,
+                       LlmClient.LlmOptions options, int iteration) {
         emit(new AgentEvent.LlmRequest(Instant.now(), iteration));
         // Rolling window: the model sees a compacted view (old tool outputs
         // stubbed); the stored transcript and journal keep full history.
@@ -493,8 +735,72 @@ public final class ReActAgent {
         } else {
             response = config.client().chat(modelMessages, tools, options);
         }
-        emit(new AgentEvent.LlmResponse(Instant.now(), iteration, response));
-        return response;
+        RepairedTurn repaired = repairToolCalls(response);
+        emit(new AgentEvent.LlmResponse(Instant.now(), iteration, repaired.response()));
+        return new Turn(repaired.response(), repaired.allCallsDropped());
+    }
+
+    /**
+     * The outcome of the model-agnostic tool-call repair pass:
+     * the sanitized response, whether every tool call was dropped
+     * (the turn carried calls but none survived), and the per-call
+     * details for event emission.
+     */
+    private record RepairedTurn(ChatResponse response, boolean allCallsDropped,
+                                List<ToolCallRepair.RepairedCall> repairedCalls,
+                                List<ToolCallRequest> droppedCalls) {}
+
+    /**
+     * Pure repair pass (no events): a blank or mangled function name with
+     * intact arguments is re-attributed by argument-signature matching
+     * ({@link ToolCallRepair}). Unrecoverable calls with a non-blank name
+     * pass through untouched for the normal unknown-tool error path.
+     * Unrecoverable calls with a BLANK name are dropped entirely — they
+     * cannot be dispatched and must never reach the provider in history
+     * (some providers reject blank names with HTTP 400).
+     */
+    private static RepairedTurn repairTurn(ChatResponse response, ToolRegistry registry) {
+        if (!response.hasToolCalls()) {
+            return new RepairedTurn(response, false, List.of(), List.of());
+        }
+        List<ToolCallRepair.RepairedCall> repaired =
+            ToolCallRepair.repairAll(response.toolCalls(), registry);
+        List<ToolCallRequest> calls = new ArrayList<>(repaired.size());
+        List<ToolCallRepair.RepairedCall> repairedCalls = new ArrayList<>();
+        List<ToolCallRequest> droppedCalls = new ArrayList<>();
+        for (ToolCallRepair.RepairedCall rc : repaired) {
+            if (rc.repaired()) {
+                repairedCalls.add(rc);
+                calls.add(rc.call());
+            } else if (rc.call().name() == null || rc.call().name().isBlank()) {
+                droppedCalls.add(rc.call());
+            } else {
+                calls.add(rc.call());
+            }
+        }
+        boolean changed = !repairedCalls.isEmpty() || !droppedCalls.isEmpty();
+        ChatResponse out = changed
+            ? new ChatResponse(response.content(), calls, response.usage())
+            : response;
+        return new RepairedTurn(out, calls.isEmpty(), repairedCalls, droppedCalls);
+    }
+
+    /**
+     * Repair pass with event emission for live runs. The repaired name is
+     * what history records, so dispatch works and follow-up requests never
+     * echo a blank name back to the provider.
+     */
+    private RepairedTurn repairToolCalls(ChatResponse response) {
+        RepairedTurn turn = repairTurn(response, config.tools());
+        for (ToolCallRepair.RepairedCall rc : turn.repairedCalls()) {
+            emit(new AgentEvent.ToolCallRepaired(
+                Instant.now(), rc.call().id(), rc.recoveredName()));
+        }
+        for (ToolCallRequest dropped : turn.droppedCalls()) {
+            emit(new AgentEvent.ToolCallRepaired(
+                Instant.now(), dropped.id(), "<dropped:blank-name>"));
+        }
+        return turn;
     }
 
     private <T> Formatted<T> formatTranscript(List<ChatMessage> messages, int baseIteration,
@@ -507,7 +813,7 @@ public final class ReActAgent {
 
         LlmClient.LlmOptions options =
             new LlmClient.LlmOptions(config.temperature(), 4096).withJsonSchema(schema);
-        ChatResponse formatted = doChat(m, List.of(), options, baseIteration + 1);
+        ChatResponse formatted = doChat(m, List.of(), options, baseIteration + 1).response();
         chargeBudget(formatted.usage());
 
         String json = formatted.content() == null ? "" : formatted.content().trim();
@@ -610,7 +916,13 @@ public final class ReActAgent {
             try {
                 var def = registry.find(call.name());
                 if (def.isEmpty()) {
-                    result = "ERROR: unknown tool '" + call.name() + "'";
+                    // Name the valid tools so the model can self-correct on
+                    // the next turn instead of repeating the bad name.
+                    String valid = registry.all().stream()
+                        .map(ToolDefinition::name)
+                        .collect(java.util.stream.Collectors.joining(", "));
+                    result = "ERROR: unknown tool '" + call.name()
+                        + "'. Use exactly one of these tool names: " + valid + ".";
                 } else if (def.get().requiresApproval()) {
                     emit(new AgentEvent.ApprovalRequested(
                         Instant.now(), call.name(), call.arguments()));

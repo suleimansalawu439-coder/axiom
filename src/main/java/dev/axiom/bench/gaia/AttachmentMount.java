@@ -58,18 +58,29 @@ public final class AttachmentMount {
      * Copy a task's matched files into its workspace, stripping the
      * {@code <taskId>-} name prefix so the workspace shows the original
      * file name. A file named exactly the task id keeps its name.
+     *
+     * <p>Security: the mounted name is normalized and verified to stay
+     * within the workspace. Names containing path traversal ({@code ..}),
+     * absolute paths, or separators that escape the workspace are rejected.
      */
     public static void mount(String taskId, List<Path> files, Path workspace)
             throws IOException {
         String uuid = taskId.startsWith("gaia-") ? taskId.substring(5) : taskId;
         String prefix = uuid + "-";
+        Path normalizedWorkspace = workspace.toAbsolutePath().normalize();
         for (Path f : files) {
             String name = f.getFileName().toString();
             String mounted = name.startsWith(prefix)
                 ? name.substring(prefix.length()) : name;
             if (mounted.isBlank()) mounted = name;
-            Files.copy(f, workspace.resolve(mounted),
-                StandardCopyOption.REPLACE_EXISTING);
+            // Prevent path traversal: normalize and verify containment.
+            Path dest = normalizedWorkspace.resolve(mounted).normalize();
+            if (!dest.startsWith(normalizedWorkspace)) {
+                throw new IOException("Attachment name escapes workspace: " + name);
+            }
+            // Use only the file name, not any directory components.
+            Path safeDest = normalizedWorkspace.resolve(dest.getFileName().toString());
+            Files.copy(f, safeDest, StandardCopyOption.REPLACE_EXISTING);
         }
     }
 }

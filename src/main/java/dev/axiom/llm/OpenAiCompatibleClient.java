@@ -35,7 +35,10 @@ public final class OpenAiCompatibleClient implements StreamingLlmClient {
         // without this, a sandbox or corporate egress proxy breaks all TLS calls.
         proxySettings.ifPresent(s -> {
             builder.proxy(ProxyConfig.selectorFor(s));
-            ProxyConfig.authenticatorFor(s).ifPresent(builder::authenticator);
+            // Preemptive proxy auth via system properties. Never install an
+            // Authenticator here: its mere presence makes the HttpClient
+            // withhold our own Authorization header (verified 2026-09-27).
+            ProxyConfig.applyPreemptiveProxyAuth(s);
         });
         this.http = builder.build();
         String normalized = baseUrl.endsWith("/") ? baseUrl : baseUrl + "/";
@@ -54,6 +57,11 @@ public final class OpenAiCompatibleClient implements StreamingLlmClient {
     @Override
     public String model() {
         return model;
+    }
+
+    @Override
+    public String endpointId() {
+        return endpoint.toString();
     }
 
     @Override
@@ -121,6 +129,11 @@ public final class OpenAiCompatibleClient implements StreamingLlmClient {
             if (m.toolCalls() != null && !m.toolCalls().isEmpty()) {
                 List<Map<String, Object>> wireCalls = new ArrayList<>();
                 for (ToolCallRequest tc : m.toolCalls()) {
+                    // Belt-and-braces: a blank function name is rejected by
+                    // providers (HTTP 400). The agent repairs these at parse
+                    // time, but history replayed from any other source must
+                    // never emit one either.
+                    if (tc.name() == null || tc.name().isBlank()) continue;
                     try {
                         Map<String, Object> wireCall = new LinkedHashMap<>();
                         wireCall.put("id", tc.id());

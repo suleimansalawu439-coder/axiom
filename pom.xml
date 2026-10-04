@@ -6,7 +6,7 @@
 
     <groupId>dev.axiom</groupId>
     <artifactId>axiom</artifactId>
-    <version>0.4.0</version>
+    <version>0.12.0</version>
     <packaging>jar</packaging>
     <name>Axiom — Type-Safe AI Agent Framework for the JVM</name>
 
@@ -14,7 +14,7 @@
         <maven.compiler.source>21</maven.compiler.source>
         <maven.compiler.target>21</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <jackson.version>2.17.2</jackson.version>
+        <jackson.version>2.18.3</jackson.version>
         <junit.version>5.10.3</junit.version>
         <slf4j.version>2.0.13</slf4j.version>
     </properties>
@@ -50,12 +50,89 @@
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-compiler-plugin</artifactId>
                 <version>3.13.0</version>
-                <configuration>
-                    <release>21</release>
-                    <!-- Real parameter names are required: the ToolProcessor
-                         fails compilation on synthetic names (arg0, ...). -->
-                    <parameters>true</parameters>
-                </configuration>
+                <executions>
+                    <execution>
+                        <id>default-compile</id>
+                        <configuration>
+                            <release>21</release>
+                            <!-- Real parameter names are required: the ToolProcessor
+                                 fails compilation on synthetic names (arg0, ...). -->
+                            <parameters>true</parameters>
+                            <!-- The ToolProcessor is self-hosted: its class is
+                                 compiled in this very execution, so it cannot
+                                 be discovered while compiling. Disable
+                                 processing here; the tool-processor run below
+                                 applies it explicitly once the class exists. -->
+                            <proc>none</proc>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>default-testCompile</id>
+                        <configuration>
+                            <release>21</release>
+                            <parameters>true</parameters>
+                            <!-- proc defaults to full: by now target/classes
+                                 holds the compiled ToolProcessor plus its
+                                 META-INF/services registration, so javac
+                                 discovers it and validates @Tool usage in
+                                 test sources exactly like the main build. -->
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-antrun-plugin</artifactId>
+                <version>3.1.0</version>
+                <executions>
+                    <execution>
+                        <id>run-tool-processor</id>
+                        <!-- After main classes exist, run the self-hosted
+                             ToolProcessor over the main sources (-proc:only):
+                             @Tool violations fail the build here and the
+                             JSON schema docs are generated into
+                             META-INF/axiom/tools/ for the runtime registry.
+                             Mirrors the manual build.sh two-phase build. -->
+                        <phase>process-classes</phase>
+                        <goals>
+                            <goal>run</goal>
+                        </goals>
+                        <configuration>
+                            <target>
+                                <!-- File list + classpath for the forked javac. -->
+                                <pathconvert property="axiom.main.sources" pathsep=" ">
+                                    <path>
+                                        <fileset dir="${project.build.sourceDirectory}"
+                                                 includes="**/*.java"/>
+                                    </path>
+                                </pathconvert>
+                                <pathconvert property="axiom.proc.classpath"
+                                             pathsep="${path.separator}">
+                                    <path>
+                                        <pathelement location="${project.build.outputDirectory}"/>
+                                        <path refid="maven.compile.classpath"/>
+                                    </path>
+                                </pathconvert>
+                                <!-- Plain exec (not the javac task): Ant's
+                                     javac skips when target/classes is newer
+                                     than the sources, which is always true
+                                     right after default-compile. -->
+                                <exec executable="${java.home}/bin/javac"
+                                      failonerror="true">
+                                    <arg value="-parameters"/>
+                                    <arg value="-proc:only"/>
+                                    <arg value="-implicit:none"/>
+                                    <arg value="-Xlint:-options"/>
+                                    <arg value="-cp"/>
+                                    <arg value="${axiom.proc.classpath}"/>
+                                    <arg value="-d"/>
+                                    <arg value="${project.build.outputDirectory}"/>
+                                    <arg line="${axiom.main.sources}"/>
+                                </exec>
+                            </target>
+                        </configuration>
+                    </execution>
+                </executions>
             </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>

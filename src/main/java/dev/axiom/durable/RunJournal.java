@@ -131,7 +131,18 @@ public final class RunJournal implements AutoCloseable {
 
     /** Open the journal of an existing run for resume. */
     public static RunJournal open(Path root, String runId) {
-        Path dir = root.resolve(runId);
+        // Validate runId format: must be a UUID or safe alphanumeric identifier.
+        // Prevents path traversal (e.g. "../../etc") in the checkpoint ID.
+        if (runId == null || !runId.matches("[a-zA-Z0-9\\-]{1,64}")) {
+            throw new DurableException(
+                "Invalid run ID format: '" + runId + "'. Must be alphanumeric with dashes.");
+        }
+        Path normalizedRoot = root.toAbsolutePath().normalize();
+        Path dir = normalizedRoot.resolve(runId).normalize();
+        if (!dir.startsWith(normalizedRoot)) {
+            throw new DurableException(
+                "Run ID escapes journal root: '" + runId + "'");
+        }
         if (!Files.isDirectory(dir) || !Files.isRegularFile(dir.resolve("journal.jsonl"))) {
             throw new DurableException("No journal for run '" + runId + "' under " + root);
         }
@@ -313,7 +324,9 @@ public final class RunJournal implements AutoCloseable {
                     str(m.get("toolName")), argsMap(m.get("arguments"))));
                 case "tool_call_completed" -> out.add(new ToolCallCompleted(ts,
                     str(m.get("idempotencyKey")), strOrNull(m.get("result"))));
-                default -> { /* ignore unknown record kinds */ }
+                default -> throw new DurableException(
+                    "Journal " + runId + " contains unknown record kind: '" + kind
+                    + "'. Rejecting to prevent silent data loss from tampered journals.");
             }
         }
         return out;
@@ -363,10 +376,14 @@ public final class RunJournal implements AutoCloseable {
     }
 
     private static Instant parseInstant(Object o) {
+        if (o == null) {
+            throw new DurableException("Journal record missing required timestamp");
+        }
         try {
-            return o == null ? Instant.now() : Instant.parse(String.valueOf(o));
+            return Instant.parse(String.valueOf(o));
         } catch (Exception e) {
-            return Instant.now();
+            throw new DurableException(
+                "Journal record has invalid timestamp: '" + o + "'", e);
         }
     }
 

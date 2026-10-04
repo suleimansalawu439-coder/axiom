@@ -36,6 +36,9 @@ public final class AgentConfig {
      * The stored transcript is never modified.
      */
     private final int toolOutputCharCap;
+    private final int stagnationRepeatLimit;
+    private final int stagnationErrorLimit;
+    private final int stagnationFruitlessLimit;
 
     private AgentConfig(Builder b) {
         this.client = b.client;
@@ -51,6 +54,9 @@ public final class AgentConfig {
         this.eventListeners = List.copyOf(b.eventListeners);
         this.terminalTools = java.util.Set.copyOf(b.terminalTools);
         this.toolOutputCharCap = b.toolOutputCharCap;
+        this.stagnationRepeatLimit = b.stagnationRepeatLimit;
+        this.stagnationErrorLimit = b.stagnationErrorLimit;
+        this.stagnationFruitlessLimit = b.stagnationFruitlessLimit;
     }
 
     public LlmClient client() { return client; }
@@ -79,6 +85,9 @@ public final class AgentConfig {
     public java.util.Set<String> terminalTools() { return terminalTools; }
     /** Cap on tool-observation characters sent to the model per turn. */
     public int toolOutputCharCap() { return toolOutputCharCap; }
+    public int stagnationRepeatLimit() { return stagnationRepeatLimit; }
+    public int stagnationErrorLimit() { return stagnationErrorLimit; }
+    public int stagnationFruitlessLimit() { return stagnationFruitlessLimit; }
 
     void emit(AgentEvent event) {
         for (Consumer<AgentEvent> l : eventListeners) {
@@ -109,6 +118,14 @@ public final class AgentConfig {
         private final List<Consumer<AgentEvent>> eventListeners = new ArrayList<>();
         private final java.util.Set<String> terminalTools = new java.util.LinkedHashSet<>();
         private int toolOutputCharCap = ContextWindow.toolOutputCap();
+        // Stagnation guardrails: enabled by default (3 repeats / 4 errors /
+        // 6 fruitless turns). Evidence 2026-10-02: disabling them took a
+        // 5-task DeepSeek-Pro probe from 3/5 @153k tokens to 1/5 @363k
+        // tokens — the extra wandering turns wrong answers out of right
+        // ones. Keep them on; tune the limits, don't remove the guard.
+        private int stagnationRepeatLimit = 3;
+        private int stagnationErrorLimit = 4;
+        private int stagnationFruitlessLimit = 6;
 
         public Builder withClient(LlmClient client) { this.client = client; return this; }
         public Builder withModel(String model) {
@@ -135,6 +152,21 @@ public final class AgentConfig {
         }
         public Builder withSystemPrompt(String prompt) { this.systemPrompt = prompt; return this; }
         public Builder withMaxIterations(int n) { this.maxIterations = n; return this; }
+        /**
+         * Model-agnostic runaway-loop limits for {@link StagnationController}:
+         * stop the loop early on {@code repeatLimit} identical tool calls,
+         * {@code errorLimit} consecutive tool errors, or
+         * {@code fruitlessLimit} iterations with no productive tool output.
+         * A limit of 0 disables that signal. Defaults are (3, 4, 6): three
+         * identical calls, four consecutive errors, or six fruitless
+         * iterations.
+         */
+        public Builder withStagnationLimits(int repeatLimit, int errorLimit, int fruitlessLimit) {
+            this.stagnationRepeatLimit = repeatLimit;
+            this.stagnationErrorLimit = errorLimit;
+            this.stagnationFruitlessLimit = fruitlessLimit;
+            return this;
+        }
         public Builder withTemperature(double t) { this.temperature = t; return this; }
         public Builder withApprovalHandler(ApprovalHandler h) { this.approvalHandler = h; return this; }
         public Builder withMemory(Memory memory) { this.memory = memory; return this; }

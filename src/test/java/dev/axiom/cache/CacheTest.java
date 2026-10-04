@@ -67,13 +67,22 @@ class CacheTest {
         var m1 = List.of(ChatMessage.user("hi"));
         var m2 = List.of(ChatMessage.user("bye"));
         var opts = LlmClient.LlmOptions.defaults();
-        String k1 = CacheKeys.forChat("gpt-4o", m1, List.of(), opts);
-        String k2 = CacheKeys.forChat("gpt-4o", m1, List.of(), opts);
-        String k3 = CacheKeys.forChat("gpt-4o", m2, List.of(), opts);
-        String k4 = CacheKeys.forChat("gpt-4o-mini", m1, List.of(), opts);
+        String k1 = CacheKeys.forChat("https://api.openai.com/v1", "gpt-4o", m1, List.of(), opts);
+        String k2 = CacheKeys.forChat("https://api.openai.com/v1", "gpt-4o", m1, List.of(), opts);
+        String k3 = CacheKeys.forChat("https://api.openai.com/v1", "gpt-4o", m2, List.of(), opts);
+        String k4 = CacheKeys.forChat("https://api.openai.com/v1", "gpt-4o-mini", m1, List.of(), opts);
         assertEquals(k1, k2);
         assertNotEquals(k1, k3);
         assertNotEquals(k1, k4);
+    }
+
+    @Test
+    void differentEndpointsDoNotCollide() {
+        var m1 = List.of(ChatMessage.user("hi"));
+        var opts = LlmClient.LlmOptions.defaults();
+        String k1 = CacheKeys.forChat("https://api.openai.com/v1", "gpt-4o", m1, List.of(), opts);
+        String k2 = CacheKeys.forChat("https://other.example.com/v1", "gpt-4o", m1, List.of(), opts);
+        assertNotEquals(k1, k2, "Same request to different endpoints must not share cache key");
     }
 
     // ---------- CachingLlmClient ----------
@@ -193,7 +202,7 @@ class CacheTest {
         var opts = LlmClient.LlmOptions.defaults();
 
         // Entry in the pre-chunk format: no "tokens" property.
-        String key = CacheKeys.forChat("stream-counter", msgs("hi"), List.of(), opts);
+        String key = CacheKeys.forChat("https://api.openai.com/v1", "stream-counter", msgs("hi"), List.of(), opts);
         cache.put(key,
             "{\"content\":\"stale\",\"toolCalls\":[]," +
             "\"promptTokens\":1,\"completionTokens\":1,\"totalTokens\":2}");
@@ -219,7 +228,7 @@ class CacheTest {
         var client = new CachingLlmClient(streaming, cache);
         var opts = LlmClient.LlmOptions.defaults();
 
-        cache.put(CacheKeys.forChat("stream-counter", msgs("hi"), List.of(), opts),
+        cache.put(CacheKeys.forChat("https://api.openai.com/v1", "stream-counter", msgs("hi"), List.of(), opts),
             "this is not json {{{");
 
         var seen = new ArrayList<String>();
@@ -237,7 +246,7 @@ class CacheTest {
         var client = new CachingLlmClient(counting, cache);
         var opts = LlmClient.LlmOptions.defaults();
 
-        cache.put(CacheKeys.forChat("counter", msgs("hi"), List.of(), opts), "nope{{{");
+        cache.put(CacheKeys.forChat("https://api.openai.com/v1", "counter", msgs("hi"), List.of(), opts), "nope{{{");
 
         ChatResponse r = client.chat(msgs("hi"), List.of(), opts);
         assertEquals(1, counting.calls);

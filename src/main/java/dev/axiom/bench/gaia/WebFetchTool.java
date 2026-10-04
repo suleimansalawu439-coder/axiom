@@ -1,6 +1,7 @@
 package dev.axiom.bench.gaia;
 
 import dev.axiom.capabilities.Capability;
+import dev.axiom.llm.ProxyConfig;
 import dev.axiom.tools.Tool;
 import dev.axiom.tools.ToolParam;
 
@@ -58,16 +59,25 @@ public final class WebFetchTool {
 
     private static final Pattern SCRIPT_STYLE =
         Pattern.compile("(?is)<(script|style)[^>]*>.*?</\\1>");
+    private static final Pattern BLOCKS =
+        Pattern.compile("(?is)<(br|p|div|li|h[1-6]|tr|blockquote|section|article|header|footer|hr)[^>]*>");
     private static final Pattern TAGS = Pattern.compile("<[^>]+>");
-    private static final Pattern WS = Pattern.compile("\\s+");
+    /** Horizontal whitespace only — newlines are preserved by htmlToText. */
+    private static final Pattern HWS = Pattern.compile("[ \\t\\x0B\\f\\r]+");
 
     private final HttpClient http;
 
+    /** Maximum redirects to follow; each hop is SSRF-validated. */
+    private static final int MAX_REDIRECTS = 5;
+
     public WebFetchTool() {
-        this.http = HttpClient.newBuilder()
+        HttpClient.Builder builder = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(15))
-            .followRedirects(HttpClient.Redirect.NORMAL)
-            .build();
+            // NEVER follow redirects automatically: each hop must pass
+            // SSRF validation. Redirects are handled manually in fetch().
+            .followRedirects(HttpClient.Redirect.NEVER);
+        ProxyConfig.configureClient(builder);
+        this.http = builder.build();
     }
 
     @Tool(name = "web_fetch",
@@ -91,14 +101,49 @@ public final class WebFetchTool {
         if (!"http".equalsIgnoreCase(scheme) && !"https".equalsIgnoreCase(scheme)) {
             return "ERROR: only http(s) URLs are allowed: " + url;
         }
+        // SSRF guard: validate the initial destination.
+        String blocked = SsrfGuard.validate(uri);
+        if (blocked != null) {
+            return "ERROR: blocked by SSRF guard: " + blocked;
+        }
         try {
-            HttpRequest req = HttpRequest.newBuilder(uri)
-                .timeout(Duration.ofSeconds(30))
-                .header("User-Agent", "axiom-bench/0.12.0 (+benchmark harness)")
-                .GET()
-                .build();
-            HttpResponse<byte[]> res =
-                http.send(req, HttpResponse.BodyHandlers.ofByteArray());
+            // Manual redirect handling: each hop is SSRF-validated.
+            URI current = uri;
+            HttpResponse<byte[]> res = null;
+            for (int i = 0; i <= MAX_REDIRECTS; i++) {
+                HttpRequest req = HttpRequest.newBuilder(current)
+                    .timeout(Duration.ofSeconds(30))
+                    .header("User-Agent", "axiom-bench/0.12.0 (+benchmark harness)")
+                    .GET()
+                    .build();
+                res = http.send(req, HttpResponse.BodyHandlers.ofByteArray());
+                int status = res.statusCode();
+                if (status >= 300 && status < 400) {
+                    if (i == MAX_REDIRECTS) {
+                        return "ERROR: too many redirects fetching " + url;
+                    }
+                    String loc = res.headers().firstValue("location").orElse(null);
+                    if (loc == null) {
+                        return "ERROR: redirect without location fetching " + url;
+                    }
+                    URI next = current.resolve(loc);
+                    String nextScheme = next.getScheme();
+                    if (!"http".equalsIgnoreCase(nextScheme)
+                            && !"https".equalsIgnoreCase(nextScheme)) {
+                        return "ERROR: redirect to non-http(s) URL blocked: " + loc;
+                    }
+                    String hopBlocked = SsrfGuard.validate(next);
+                    if (hopBlocked != null) {
+                        return "ERROR: redirect blocked by SSRF guard: " + hopBlocked;
+                    }
+                    current = next;
+                    continue;
+                }
+                break;
+            }
+            if (res == null) {
+                return "ERROR: no response fetching " + url;
+            }
             if (res.statusCode() < 200 || res.statusCode() >= 300) {
                 return "ERROR: HTTP " + res.statusCode() + " fetching " + url;
             }
@@ -114,8 +159,10 @@ public final class WebFetchTool {
             } else {
                 text = new String(body, java.nio.charset.StandardCharsets.UTF_8);
             }
-            text = WS.matcher(text.strip()).replaceAll(" ");
-            text = truncateToCap(text);
+            // NOTE: no whitespace collapsing here — htmlToText already
+            // normalizes while preserving line breaks and indentation,
+            // which carry signal (e.g. poem stanza layout).
+            text = truncateToCap(text.strip());
             return text.isEmpty() ? "ERROR: no text content at " + url : text;
         } catch (Exception e) {
             return "ERROR: fetch failed for " + url + ": " + e;
@@ -129,13 +176,39 @@ public final class WebFetchTool {
         return head.contains("<html") || head.contains("<!doctype html");
     }
 
-    /** Strip scripts/styles/tags; keep crude but predictable text. */
+    /** Strip scripts/styles/tags; keep crude but predictable text.
+     *
+     * <p>Line structure is preserved: block elements become newlines and
+     * leading whitespace (indentation) survives. This matters for tasks
+     * whose answer lives in the page's visual layout (e.g. which stanza
+     * of a poem has indented lines) — collapsing everything to one line
+     * would destroy the signal. */
     static String htmlToText(String html) {
-        String t = SCRIPT_STYLE.matcher(html).replaceAll(" ");
+        String t = SCRIPT_STYLE.matcher(html).replaceAll("\n");
+        t = BLOCKS.matcher(t).replaceAll("\n");
         t = TAGS.matcher(t).replaceAll(" ");
-        // crude entity decoding for the common cases
         t = t.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
-             .replace("&quot;", "\"").replace("&#39;", "'").replace("&nbsp;", " ");
-        return t;
+             .replace("&quot;", "\"").replace("&#39;", "'").replace("&#039;", "'")
+             .replace("&#x27;", "'").replace("&#x60;", "`").replace("&nbsp;", " ");
+        // Collapse horizontal whitespace per line, but keep newlines and
+        // leading indentation; squeeze runs of blank lines to one.
+        String[] lines = t.split("\n");
+        StringBuilder sb = new StringBuilder();
+        boolean prevBlank = true; // suppress leading blank lines
+        for (String line : lines) {
+            int i = 0;
+            while (i < line.length()
+                && (line.charAt(i) == ' ' || line.charAt(i) == '\t')) i++;
+            String indent = line.substring(0, i);
+            String rest = HWS.matcher(line.substring(i)).replaceAll(" ").strip();
+            if (rest.isEmpty()) {
+                if (!prevBlank) sb.append('\n');
+                prevBlank = true;
+            } else {
+                sb.append(indent).append(rest).append('\n');
+                prevBlank = false;
+            }
+        }
+        return sb.toString().strip();
     }
 }

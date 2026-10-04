@@ -10,6 +10,7 @@ import java.net.ProxySelector;
 import java.net.URI;
 import java.util.List;
 import java.util.Map;
+import java.util.HashMap;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -139,5 +140,61 @@ class ProxyConfigTest {
     void authenticatorAbsentWithoutCredentials() {
         var s = ProxyConfig.fromEnv(Map.of("HTTPS_PROXY", "http://proxy:3128")).orElseThrow();
         assertTrue(ProxyConfig.authenticatorFor(s).isEmpty());
+    }
+
+    @Test
+    void preemptiveProxyAuthSetsSystemPropertiesOnlyWhenAbsent() {
+        var s = ProxyConfig.fromEnv(Map.of(
+            "HTTPS_PROXY", "http://user:s3cret@proxy:3128")).orElseThrow();
+        String[] keys = {"https.proxyUser", "https.proxyPassword", "http.proxyUser", "http.proxyPassword"};
+        Map<String, String> saved = new HashMap<>();
+        for (String k : keys) saved.put(k, System.getProperty(k));
+        try {
+            for (String k : keys) System.clearProperty(k);
+            ProxyConfig.applyPreemptiveProxyAuth(s);
+            assertEquals("user", System.getProperty("https.proxyUser"));
+            assertEquals("s3cret", System.getProperty("https.proxyPassword"));
+            assertEquals("user", System.getProperty("http.proxyUser"));
+            assertEquals("s3cret", System.getProperty("http.proxyPassword"));
+            // Explicit -D flags win: existing values are never overwritten.
+            System.setProperty("https.proxyUser", "explicit");
+            ProxyConfig.applyPreemptiveProxyAuth(s);
+            assertEquals("explicit", System.getProperty("https.proxyUser"));
+        } finally {
+            for (String k : keys) {
+                if (saved.get(k) == null) System.clearProperty(k);
+                else System.setProperty(k, saved.get(k));
+            }
+        }
+    }
+
+    @Test
+    void preemptiveProxyAuthNoopWithoutCredentials() {
+        var s = ProxyConfig.fromEnv(Map.of("HTTPS_PROXY", "http://proxy:3128")).orElseThrow();
+        Map<String, String> saved = new HashMap<>();
+        for (String k : new String[]{"https.proxyUser", "https.proxyPassword"})
+            saved.put(k, System.getProperty(k));
+        try {
+            System.clearProperty("https.proxyUser");
+            System.clearProperty("https.proxyPassword");
+            ProxyConfig.applyPreemptiveProxyAuth(s);
+            assertNull(System.getProperty("https.proxyUser"));
+            assertNull(System.getProperty("https.proxyPassword"));
+        } finally {
+            for (var e : saved.entrySet()) {
+                if (e.getValue() == null) System.clearProperty(e.getKey());
+                else System.setProperty(e.getKey(), e.getValue());
+            }
+        }
+    }
+
+    @Test
+    void resolveProxyHostPrefersIpv6() {
+        // localhost resolves to both ::1 and 127.0.0.1 here; the IPv6
+        // endpoint must win (2026-10-02: sandbox proxy's IPv4 resets).
+        var addr = ProxyConfig.resolveProxyHost("localhost");
+        assertNotNull(addr);
+        assertTrue(addr instanceof java.net.Inet6Address,
+            "expected IPv6, got " + addr);
     }
 }

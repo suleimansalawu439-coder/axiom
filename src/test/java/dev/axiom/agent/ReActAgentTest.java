@@ -236,4 +236,29 @@ class ReActAgentTest {
         assertTrue(secondPrompt.stream().anyMatch(m ->
             m.role() == dev.axiom.llm.ChatRole.ASSISTANT && m.content().equals("First answer.")));
     }
+
+    @Test
+    void stripFormattingCruftHandlesScreenplaySluglines() {
+        assertEquals("THE CASTLE",
+            ReActAgent.stripFormattingCruft("INT. THE CASTLE - DAY"));
+        assertEquals("THE CASTLE",
+            ReActAgent.stripFormattingCruft("EXT. THE CASTLE - NIGHT"));
+        assertEquals("quoted",
+            ReActAgent.stripFormattingCruft("\"quoted\""));
+        assertEquals("plain", ReActAgent.stripFormattingCruft("plain"));
+    }
+
+    @Test
+    void isProseAnswerDetectsThinking() {
+        // Third-person self-reference
+        assertTrue(ReActAgent.isProseAnswer(
+            "When the agent was asked a question, it began searching for"));
+        // Incomplete (trailing open quote)
+        assertTrue(ReActAgent.isProseAnswer(
+            "Merriam-Webster Word of the Day: **\"picaresque"));
+        // Normal short answers are NOT prose
+        assertFalse(ReActAgent.isProseAnswer("Guatemala"));
+        assertFalse(ReActAgent.isProseAnswer("3"));
+        assertFalse(ReActAgent.isProseAnswer("THE CASTLE"));
+    }
 }

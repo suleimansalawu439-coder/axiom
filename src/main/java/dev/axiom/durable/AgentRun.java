@@ -156,6 +156,12 @@ public final class AgentRun implements AutoCloseable {
      * Rebuild a config from the journal's config snapshot: an
      * OpenAI-compatible client for the recorded model and fresh instances of
      * the recorded {@code @Tool} holder classes.
+     *
+     * <p>Security: class names from the journal are validated against an
+     * allowlist. Only classes in the {@code dev.axiom} package (or its
+     * subpackages) that have at least one {@code @Tool}-annotated method
+     * can be instantiated. This prevents a malicious journal from triggering
+     * arbitrary class loading and constructor side effects.
      */
     @SuppressWarnings("unchecked")
     private static AgentConfig rebuildConfig(Path journalRoot, RunJournal journal) {
@@ -174,9 +180,33 @@ public final class AgentRun implements AutoCloseable {
         if (holders instanceof List<?> list) {
             for (Object h : list) {
                 String className = String.valueOf(h);
+                // Allowlist: must be in dev.axiom package and have @Tool methods.
+                if (!className.startsWith("dev.axiom.")) {
+                    throw new DurableException(
+                        "Refusing to instantiate journal-controlled class outside "
+                        + "dev.axiom package: '" + className + "'. Pass an explicit "
+                        + "AgentConfig to resumeFrom instead.");
+                }
                 try {
-                    Object holder = Class.forName(className).getDeclaredConstructor().newInstance();
+                    Class<?> clazz = Class.forName(className);
+                    // Verify it has at least one @Tool-annotated method.
+                    boolean hasTool = false;
+                    for (var m : clazz.getDeclaredMethods()) {
+                        if (m.isAnnotationPresent(dev.axiom.tools.Tool.class)) {
+                            hasTool = true;
+                            break;
+                        }
+                    }
+                    if (!hasTool) {
+                        throw new DurableException(
+                            "Refusing to instantiate '" + className
+                            + "': no @Tool-annotated methods. Pass an explicit "
+                            + "AgentConfig to resumeFrom instead.");
+                    }
+                    Object holder = clazz.getDeclaredConstructor().newInstance();
                     b.withTools(holder);
+                } catch (DurableException e) {
+                    throw e;
                 } catch (Exception e) {
                     throw new DurableException(
                         "Cannot rebuild @Tool holder '" + className

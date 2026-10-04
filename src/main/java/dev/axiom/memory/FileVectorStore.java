@@ -84,8 +84,19 @@ public final class FileVectorStore {
     // ------------------------------------------------------------------
 
     private void persist() {
+        // File locking for cross-process safety. The lock channel is held
+        // open for the duration of the write.
+        Path lockPath = file.resolveSibling(file.getFileName() + ".lock");
         try {
+            if (lockPath.getParent() != null) Files.createDirectories(lockPath.getParent());
             if (file.getParent() != null) Files.createDirectories(file.getParent());
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to create directories for " + file, e);
+        }
+        try (java.nio.channels.FileChannel ch = java.nio.channels.FileChannel.open(lockPath,
+                java.nio.file.StandardOpenOption.CREATE,
+                java.nio.file.StandardOpenOption.WRITE);
+             java.nio.channels.FileLock lock = ch.lock()) {
             List<Map<String, Object>> raw = new ArrayList<>();
             for (Entry e : entries) {
                 Map<String, Object> m = new LinkedHashMap<>();
@@ -97,12 +108,24 @@ public final class FileVectorStore {
                 m.put("metadata", e.metadata());
                 raw.add(m);
             }
-            // Atomic write: temp file + move, so a crash never leaves half a store.
-            Path tmp = file.resolveSibling(file.getFileName() + ".tmp");
-            mapper.writeValue(tmp.toFile(), Map.of("entries", raw));
-            Files.move(tmp, file,
-                java.nio.file.StandardCopyOption.REPLACE_EXISTING,
-                java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+            // Atomic write: unique temp file + move, so a crash never leaves
+            // half a store, and two processes don't collide on the temp name.
+            Path tmp = file.resolveSibling(
+                file.getFileName() + "." + java.util.UUID.randomUUID() + ".tmp");
+            try {
+                mapper.writeValue(tmp.toFile(), Map.of("entries", raw));
+                try {
+                    Files.move(tmp, file,
+                        java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+                        java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+                } catch (java.nio.file.AtomicMoveNotSupportedException e) {
+                    // Fall back to non-atomic move on filesystems without support.
+                    Files.move(tmp, file,
+                        java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                }
+            } finally {
+                Files.deleteIfExists(tmp);
+            }
         } catch (IOException e) {
             throw new IllegalStateException("Failed to persist vector store to " + file, e);
         }

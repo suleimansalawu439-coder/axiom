@@ -7,6 +7,7 @@ import dev.axiom.agent.AgentResult;
 import dev.axiom.agent.ApprovalHandler;
 import dev.axiom.budget.ModelPrices;
 import dev.axiom.llm.LlmClient;
+import dev.axiom.llm.GeminiNativeClient;
 import dev.axiom.llm.OpenAiCompatibleClient;
 import dev.axiom.resilience.RetryPolicy;
 import dev.axiom.resilience.RetryingLlmClient;
@@ -110,8 +111,14 @@ public final class BenchMain {
                     System.exit(2);
                 }
             }
+            // Gemini must use the native client: the vault credential's
+            // placement is ?key= (the proxy only swaps the surrogate there),
+            // which the OpenAI-compat endpoint cannot accept.
+            LlmClient baseClient = "gemini".equals(preset.id())
+                ? new GeminiNativeClient(apiKey == null ? "" : apiKey, model)
+                : new OpenAiCompatibleClient(preset.baseUrl(), apiKey == null ? "" : apiKey, model);
             var retrying = new RetryingLlmClient(
-                new OpenAiCompatibleClient(preset.baseUrl(), apiKey == null ? "" : apiKey, model),
+                baseClient,
                 RetryPolicy.builder()
                     .maxAttempts(6)
                     .initialBackoff(Duration.ofSeconds(2))
@@ -174,8 +181,8 @@ public final class BenchMain {
                 + "GAIA/SWE-bench suites. Provider: " + preset.id() + " (" + preset.keySignup() + "). "
                 + "Parallelism=" + runConfig.parallelism() + "; shared token-bucket rate limiter at "
                 + rpmDesc + " across all tasks and turns; per-minute HTTP 429 retried with "
-                + "Retry-After honored; daily/plan quota exhaustion aborts the run immediately "
-                + "instead of retrying a dead quota. Cost basis: provider free tier ($0).")
+                + "Retry-After honored; sustained quota exhaustion aborts the run after "
+                + "3 consecutive quota failures instead of retrying a dead quota. Cost basis: provider free tier ($0).")
             : "Deterministic fixture run: scripted model responses, real tool execution. No provider cost.";
         BenchReceipt receipt = BenchRunner.run(tasks(), factory,
             ModelPrices.defaults(), model, mode, pacingMs, notes, runConfig);

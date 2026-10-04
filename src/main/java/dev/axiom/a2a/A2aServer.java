@@ -51,10 +51,27 @@ import java.util.concurrent.Executors;
 public final class A2aServer implements AutoCloseable {
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
+    /** Maximum request body size (1 MB). Prevents memory exhaustion. */
+    static final int MAX_BODY_BYTES = 1_000_000;
+    /** Maximum task text length (100 KB). */
+    static final int MAX_TEXT_CHARS = 100_000;
+    /** Maximum tasks retained; oldest completed are evicted. */
+    static final int MAX_TASKS = 1000;
+
     private HttpServer server; // null until serve() binds
     private final Axiom.Agent agent;
     private final AgentCard card;
     private final Map<String, Map<String, Object>> tasks = new ConcurrentHashMap<>();
+    /** In-flight agent runs, for real cancellation. Task ID -> Future. */
+    private final Map<String, java.util.concurrent.Future<?>> running =
+        new ConcurrentHashMap<>();
+    /** Executor for agent runs (bounded, so cancellation is meaningful). */
+    private final java.util.concurrent.ExecutorService agentExecutor =
+        Executors.newCachedThreadPool(r -> {
+            Thread t = new Thread(r, "axiom-a2a-agent");
+            t.setDaemon(true);
+            return t;
+        });
 
     /**
      * Create an unbound server: the A2A protocol logic (card, dispatch,
@@ -98,6 +115,7 @@ public final class A2aServer implements AutoCloseable {
     @Override
     public void close() {
         if (server != null) server.stop(0);
+        agentExecutor.shutdownNow();
     }
 
     // ------------------------------------------------------------------
@@ -144,7 +162,7 @@ public final class A2aServer implements AutoCloseable {
             ? UUID.randomUUID().toString() : String.valueOf(message.get("contextId"));
         String taskId = UUID.randomUUID().toString();
         Map<String, Object> task = newTask(taskId, contextId, States.WORKING);
-        tasks.put(taskId, task);
+        putTask(taskId, task);
 
         List<Map<String, Object>> events = new ArrayList<>();
         events.add(statusUpdate(taskId, contextId, States.WORKING, false));
@@ -189,9 +207,21 @@ public final class A2aServer implements AutoCloseable {
             sendJson(ex, 405, Map.of("error", "method not allowed"));
             return;
         }
+        // Enforce body size limit to prevent memory exhaustion.
+        byte[] body;
+        try {
+            body = ex.getRequestBody().readNBytes(MAX_BODY_BYTES + 1);
+        } catch (Exception e) {
+            sendJson(ex, 400, Map.of("error", "failed to read request body"));
+            return;
+        }
+        if (body.length > MAX_BODY_BYTES) {
+            sendJson(ex, 413, Map.of("error", "request body too large"));
+            return;
+        }
         Map<String, Object> req;
         try {
-            req = MAPPER.readValue(ex.getRequestBody(), new TypeReference<>() {});
+            req = MAPPER.readValue(body, new TypeReference<>() {});
         } catch (Exception e) {
             sendJson(ex, 400, Map.of("error", "invalid JSON-RPC request"));
             return;
@@ -239,14 +269,23 @@ public final class A2aServer implements AutoCloseable {
 
         String taskId = UUID.randomUUID().toString();
         Map<String, Object> task = newTask(taskId, contextId, States.WORKING);
-        tasks.put(taskId, task);
+        putTask(taskId, task);
+        // Run the agent in the executor so cancellation can interrupt it.
+        // For message/send (non-streaming), we block waiting for completion.
+        java.util.concurrent.Future<AgentResult> future =
+            agentExecutor.submit(() -> agent.run(text));
+        running.put(taskId, future);
         try {
-            AgentResult result = agent.run(text);
+            AgentResult result = future.get();
             task.put("artifacts", List.of(textArtifact(result.output()).toJson()));
             setStatus(task, result.completed() ? States.COMPLETED : States.FAILED);
+        } catch (java.util.concurrent.CancellationException e) {
+            setStatus(task, States.CANCELED);
         } catch (Exception e) {
             task.put("artifacts", List.of(textArtifact("Agent failed: " + e.getMessage()).toJson()));
             setStatus(task, States.FAILED);
+        } finally {
+            running.remove(taskId);
         }
         return task;
     }
@@ -262,8 +301,36 @@ public final class A2aServer implements AutoCloseable {
         String id = String.valueOf(params.get("id"));
         Map<String, Object> task = tasks.get(id);
         if (task == null) throw new RpcException(-32001, "Task not found: " + id);
+        // Real cancellation: interrupt the in-flight agent run.
+        java.util.concurrent.Future<?> future = running.remove(id);
+        if (future != null) {
+            future.cancel(true);
+        }
         setStatus(task, States.CANCELED);
         return task;
+    }
+
+    /**
+     * Put a task in the map, evicting oldest completed tasks if over the limit.
+     * Prevents unbounded memory growth from many requests.
+     */
+    private void putTask(String taskId, Map<String, Object> task) {
+        if (tasks.size() >= MAX_TASKS) {
+            // Evict oldest completed/canceled/failed tasks first.
+            tasks.entrySet().removeIf(e -> {
+                Object status = e.getValue().get("status");
+                if (status instanceof Map<?, ?> sm) {
+                    String state = String.valueOf(sm.get("state"));
+                    return !States.WORKING.equals(state);
+                }
+                return false;
+            });
+            // If still over limit (all working), remove oldest arbitrarily.
+            if (tasks.size() >= MAX_TASKS) {
+                tasks.keySet().stream().findFirst().ifPresent(tasks::remove);
+            }
+        }
+        tasks.put(taskId, task);
     }
 
     /**
@@ -346,6 +413,10 @@ public final class A2aServer implements AutoCloseable {
             if ("text".equals(String.valueOf(p.get("kind"))) && p.get("text") != null) {
                 if (sb.length() > 0) sb.append("\n");
                 sb.append(String.valueOf(p.get("text")));
+                // Enforce text length limit to prevent memory exhaustion.
+                if (sb.length() > MAX_TEXT_CHARS) {
+                    return sb.substring(0, MAX_TEXT_CHARS);
+                }
             }
         }
         return sb.toString();

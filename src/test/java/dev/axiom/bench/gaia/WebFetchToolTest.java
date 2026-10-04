@@ -68,4 +68,29 @@ class WebFetchToolTest {
             }
         }
     }
+
+    @Test
+    void htmlToTextPreservesLinesAndIndentation() {
+        String html = "<div>Stanza one line one<br>Stanza one line two</div>"
+            + "<div>    indented line<br>\t\ttab-indented</div>";
+        String text = WebFetchTool.htmlToText(html);
+        String[] lines = text.split("\n");
+        assertTrue(lines.length >= 4, "lines: " + text);
+        assertTrue(text.contains("Stanza one line one"));
+        assertTrue(text.contains("Stanza one line two"));
+        // indentation must survive — it carries the answer for layout tasks
+        assertTrue(text.contains("    indented line"),
+            "indentation lost: " + text.replace("\n", "\\n"));
+        assertTrue(text.contains("\t\ttab-indented"),
+            "tab indentation lost: " + text.replace("\n", "\\n"));
+    }
+
+    @Test
+    void htmlToTextSqueezesBlankLines() {
+        String html = "<p>one</p><p></p><p>   </p><p>two</p>";
+        String text = WebFetchTool.htmlToText(html);
+        assertFalse(text.contains("\n\n\n"), "blank-run: " + text.replace("\n", "\\n"));
+        assertTrue(text.contains("one"));
+        assertTrue(text.contains("two"));
+    }
 }

@@ -2,6 +2,7 @@ package dev.axiom.llm;
 
 import java.io.IOException;
 import java.net.Authenticator;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.PasswordAuthentication;
 import java.net.Proxy;
@@ -9,6 +10,7 @@ import java.net.ProxySelector;
 import java.net.SocketAddress;
 import java.net.URI;
 import java.net.URLDecoder;
+import java.net.UnknownHostException;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.List;
@@ -41,6 +43,19 @@ public final class ProxyConfig {
         return fromEnv(System.getenv());
     }
 
+    /**
+     * Apply the environment proxy configuration to an {@link java.net.http.HttpClient.Builder}.
+     * Safe to call unconditionally: no-op when no proxy is configured. Web tools
+     * (search/fetch) must call this — sandbox DNS interception blackholes direct
+     * connections to non-allowlisted hosts, so only the proxy path reaches them.
+     */
+    public static void configureClient(java.net.http.HttpClient.Builder builder) {
+        fromEnv().ifPresent(s -> {
+            builder.proxy(selectorFor(s));
+            applyPreemptiveProxyAuth(s);
+        });
+    }
+
     /** Parse proxy settings from a supplied environment map (test seam). */
     public static Optional<Settings> fromEnv(Map<String, String> env) {
         ProxyEndpoint https = parse(
@@ -63,8 +78,11 @@ public final class ProxyConfig {
                 if (ep == null || isBypassed(uri.getHost(), settings.noProxy())) {
                     return List.of(Proxy.NO_PROXY);
                 }
-                return List.of(new Proxy(Proxy.Type.HTTP,
-                    new InetSocketAddress(ep.host(), ep.port())));
+                InetAddress resolved = resolveProxyHost(ep.host());
+                InetSocketAddress addr = resolved != null
+                    ? new InetSocketAddress(resolved, ep.port())
+                    : new InetSocketAddress(ep.host(), ep.port());
+                return List.of(new Proxy(Proxy.Type.HTTP, addr));
             }
 
             @Override
@@ -75,8 +93,40 @@ public final class ProxyConfig {
     }
 
     /**
+     * Resolve the proxy hostname, preferring IPv6 addresses.
+     *
+     * <p>Empirically (2026-10-02, Hatch sandbox): the egress proxy's IPv4
+     * endpoint (198.19.0.1:3128) accepts TCP but resets every connection,
+     * while its IPv6 endpoint works. {@link InetSocketAddress} with a
+     * hostname lets the JVM pick — usually the dead IPv4. Resolving here
+     * and preferring IPv6 makes the proxy path actually work.
+     */
+    static InetAddress resolveProxyHost(String host) {
+        try {
+            InetAddress[] addrs = InetAddress.getAllByName(host);
+            for (InetAddress a : addrs) {
+                if (a instanceof java.net.Inet6Address) return a;
+            }
+            if (addrs.length > 0) return addrs[0];
+        } catch (UnknownHostException e) {
+            // fall through to unresolved
+        }
+        return null;
+    }
+
+    /**
      * Build an {@link Authenticator} supplying proxy credentials on 407
      * challenges, or empty when the configured proxy needs no auth.
+     *
+     * <p><b>Do not install this on an {@link java.net.http.HttpClient}.</b>
+     * Empirically (2026-09-27, JDK 21): the mere presence of <i>any</i>
+     * authenticator on the client causes the user's own {@code Authorization}
+     * header to never reach the server — no 407/401 challenge is even issued —
+     * so every API call fails with "Missing or invalid Authorization header".
+     * Use {@link #applyPreemptiveProxyAuth(Settings)} instead, which sends
+     * proxy credentials preemptively via the standard
+     * {@code https.proxyUser}/{@code https.proxyPassword} system properties
+     * and leaves the {@code Authorization} header untouched.
      */
     public static Optional<Authenticator> authenticatorFor(Settings settings) {
         ProxyEndpoint ep = settings.https() != null ? settings.https() : settings.http();
@@ -112,6 +162,30 @@ public final class ProxyConfig {
             }
             return null;
         }
+    }
+
+    /**
+     * Send proxy credentials preemptively via the standard
+     * {@code https.proxyUser}/{@code https.proxyPassword} (and {@code http.*})
+     * system properties, which {@link java.net.http.HttpClient} transmits as
+     * {@code Proxy-Authorization} on the CONNECT without any 407 round-trip.
+     *
+     * <p>Properties already set (e.g. explicit {@code -D} flags) are left
+     * alone. Prefer this over {@link #authenticatorFor(Settings)}: installing
+     * an authenticator on the client suppresses the user's own
+     * {@code Authorization} header even when no challenge occurs.
+     */
+    public static void applyPreemptiveProxyAuth(Settings settings) {
+        ProxyEndpoint ep = settings.https() != null ? settings.https() : settings.http();
+        if (ep == null || !ep.hasCredentials()) return;
+        setIfAbsent("https.proxyUser", ep.username());
+        if (ep.password() != null) setIfAbsent("https.proxyPassword", ep.password());
+        setIfAbsent("http.proxyUser", ep.username());
+        if (ep.password() != null) setIfAbsent("http.proxyPassword", ep.password());
+    }
+
+    private static void setIfAbsent(String key, String value) {
+        if (System.getProperty(key) == null) System.setProperty(key, value);
     }
 
     // ------------------------------------------------------------------

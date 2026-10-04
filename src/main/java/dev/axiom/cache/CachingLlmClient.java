@@ -51,7 +51,8 @@ public final class CachingLlmClient implements StreamingLlmClient {
     @Override
     public ChatResponse chat(List<ChatMessage> messages, List<ToolDefinition> tools,
                              LlmOptions options) {
-        String key = CacheKeys.forChat(delegate.model(), messages, tools, options);
+        String key = CacheKeys.forChat(delegate.endpointId(), delegate.model(),
+            messages, tools, options);
         Optional<String> hit = cache.get(key);
         if (hit.isPresent()) {
             try {
@@ -68,7 +69,8 @@ public final class CachingLlmClient implements StreamingLlmClient {
     @Override
     public ChatResponse chatStream(List<ChatMessage> messages, List<ToolDefinition> tools,
                                    LlmOptions options, TokenListener listener) {
-        String key = CacheKeys.forChat(delegate.model(), messages, tools, options);
+        String key = CacheKeys.forChat(delegate.endpointId(), delegate.model(),
+            messages, tools, options);
         Optional<String> hit = cache.get(key);
         if (hit.isPresent()) {
             StoredResponse stored = tryDeserialize(hit.get());

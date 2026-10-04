@@ -17,6 +17,7 @@ import dev.axiom.bench.RateLimitedLlmClient;
 import dev.axiom.bench.RateLimiter;
 import dev.axiom.budget.ModelPrices;
 import dev.axiom.llm.LlmClient;
+import dev.axiom.llm.GeminiNativeClient;
 import dev.axiom.llm.OpenAiCompatibleClient;
 import dev.axiom.resilience.RetryPolicy;
 import dev.axiom.resilience.RetryingLlmClient;
@@ -31,8 +32,10 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.BiFunction;
 
 /**
@@ -121,6 +124,18 @@ public final class GaiaMain {
             + "- calculate: ALL arithmetic — never use run/python3 for arithmetic.\n"
             + "- run: sandboxed python3 for processing files and multi-step scripts "
             + "(not arithmetic).\n\n"
+            + "VERIFY BEFORE ANSWERING: list the question's specific constraints "
+            + "(names, dates, numbers, qualifiers like 'first', 'only', 'unknown'). "
+            + "Check your candidate against EACH one. "
+            + "Check UNITS and DIMENSIONS: "
+            + "if the question asks 'how many thousand', your answer must be in "
+            + "thousands (divide by 1000). If it asks for a year, give a year, "
+            + "not a full date. "
+            + "If a constraint fails and "
+            + "you can find a better candidate, keep researching. But do not "
+            + "research forever: if you have checked thoroughly, provide your "
+            + "best-supported answer rather than nothing. A best-effort answer "
+            + "beats an empty one.\n\n"
             + "When you know the answer, call the answer tool with ONLY the final "
             + "answer: a short string, a number, or a comma-separated list. No "
             + "explanation, no preamble, no quotes around it.\n\n"
@@ -150,6 +165,7 @@ public final class GaiaMain {
 
     public static void main(String[] args) {
         boolean live = List.of(args).contains("--live");
+        int[] shard = parseShard(List.of(args));
         List<GaiaItem> items = GaiaDataset.level1();
 
         Path attachmentsDir = attachmentsDir(List.of(args));
@@ -227,9 +243,15 @@ public final class GaiaMain {
         RateLimiter limiter = rpm > 0 ? new RateLimiter(rpm, parallelism) : null;
         final String finalApiKey = apiKey;
         java.util.function.Function<String, LlmClient> clientFor = modelName -> {
+            // Gemini must use the native client: the vault credential's
+            // placement is ?key= (the proxy only swaps the surrogate there),
+            // which the OpenAI-compat endpoint cannot accept.
+            LlmClient base = "gemini".equals(preset.id())
+                ? new GeminiNativeClient(finalApiKey == null ? "" : finalApiKey, modelName)
+                : new OpenAiCompatibleClient(preset.baseUrl(),
+                    finalApiKey == null ? "" : finalApiKey, modelName);
             var retrying = new RetryingLlmClient(
-                new OpenAiCompatibleClient(preset.baseUrl(),
-                    finalApiKey == null ? "" : finalApiKey, modelName),
+                base,
                 RetryPolicy.builder()
                     .maxAttempts(6)
                     .initialBackoff(Duration.ofSeconds(2))
@@ -251,10 +273,30 @@ public final class GaiaMain {
 
         Map<String, GaiaItem> byTaskId = new LinkedHashMap<>();
         List<BenchTask> tasks = new ArrayList<>();
-        for (GaiaItem item : attempted) {
+        // --taskIds=a,b,c runs only tasks whose id starts with one of the
+        // given prefixes (comma-separated). For targeted ablations: re-run a
+        // failing subset without re-running the whole split. Recorded in the
+        // receipt notes like a shard.
+        Set<String> onlyIds = parseTaskIds(List.of(args));
+        // --shard=i/n runs only the i-th slice of the task list (0-based),
+        // so a 42-task benchmark can be split across provider quota days and
+        // merged honestly afterwards. Scoring is untouched; the shard is
+        // recorded in the receipt notes.
+        for (int idx = 0; idx < attempted.size(); idx++) {
+            if (shard != null && idx % shard[1] != shard[0]) continue;
+            GaiaItem item = attempted.get(idx);
             String id = taskIdFor(item);
+            if (onlyIds != null && onlyIds.stream().noneMatch(id::startsWith)) continue;
             byTaskId.put(id, item);
             tasks.add(BenchTask.gaia(id, promptFor(item), item.trueAnswer()));
+        }
+        if (onlyIds != null) {
+            System.out.printf("Task filter: running %d of %d attempted tasks.%n",
+                tasks.size(), attempted.size());
+        }
+        if (shard != null) {
+            System.out.printf("Shard %d/%d: running %d of %d attempted tasks.%n",
+                shard[0], shard[1], tasks.size(), attempted.size());
         }
 
         BiFunction<BenchTask, Path, BenchAgent> factory = (task, workdir) -> {
@@ -329,8 +371,13 @@ public final class GaiaMain {
             + "(trim, strip balanced quotes, Unicode NFKC — never reinterpreted). "
             + "Provider: " + preset.id() + " (" + preset.keySignup() + "), model "
             + modelLabel + ". Parallelism=" + parallelism + "; shared token-bucket "
-            + "rate limiter at " + rpm + " RPM; daily/plan quota exhaustion aborts "
-            + "the run immediately. Cost basis: provider free tier ($0). "
+            + "rate limiter at " + rpm + " RPM; sustained quota exhaustion aborts "
+            + "the run after 3 consecutive quota failures. Cost basis: "
+            + (preset.id().equals("hcnsec")
+                ? "Hamis's hcnsec token pool (metered; exact spend in receipt usage)"
+                : "provider free tier ($0)") + ". "
+            + (shard != null ? "Shard " + shard[0] + "/" + shard[1] + " of the attempted tasks. " : "")
+            + (onlyIds != null ? "Task filter --taskIds=" + String.join(",", onlyIds) + ": only matching tasks attempted. " : "")
             + "NOT an official GAIA score or leaderboard result.";
         BenchRunner.OutputScorer scorer = (output, expected) ->
             GaiaScorer.score(GaiaAnswer.normalize(output), expected);
@@ -366,8 +413,8 @@ public final class GaiaMain {
         Map<String, BenchReceipt.TaskResult> byId = new LinkedHashMap<>();
         for (BenchReceipt.TaskResult r : attemptedReceipt.results()) byId.put(r.taskId(), r);
         for (BenchReceipt.TaskResult r : unattempted) byId.put(r.taskId(), r);
-        List<BenchReceipt.TaskResult> merged = new ArrayList<>();
-        for (GaiaItem item : items) merged.add(byId.get(taskIdFor(item)));
+        List<BenchReceipt.TaskResult> merged = mergeForReceipt(items, byId, shard, onlyIds);
+
         BenchReceipt receipt = new BenchReceipt("axiom", dev.axiom.Version.CURRENT,
             modelLabel, mode, Instant.now(), merged, notes,
             attemptedReceipt.wallClockMs(), parallelism);
@@ -406,5 +453,67 @@ public final class GaiaMain {
         int i = args.indexOf("--attachments");
         if (i < 0 || i + 1 >= args.size()) return null;
         return Paths.get(args.get(i + 1));
+    }
+
+    /**
+     * Merge attempted + unattempted results back into task order for the
+     * receipt. In shard mode, out-of-shard tasks have no result and are
+     * skipped — a shard receipt only covers the tasks the shard actually ran.
+     * The same holds for the --taskIds filter: tasks outside the filter are
+     * skipped. In full mode a missing result is an internal error (never a
+     * silent null, which {@code List.copyOf} rejects with an NPE at receipt
+     * build time).
+     */
+    static List<BenchReceipt.TaskResult> mergeForReceipt(
+            List<GaiaItem> items, Map<String, BenchReceipt.TaskResult> byId,
+            int[] shard, Set<String> onlyIds) {
+        List<BenchReceipt.TaskResult> merged = new ArrayList<>();
+        for (GaiaItem item : items) {
+            String id = taskIdFor(item);
+            if (onlyIds != null && onlyIds.stream().noneMatch(id::startsWith)) continue;
+            BenchReceipt.TaskResult r = byId.get(id);
+            if (r == null) {
+                if (shard != null) continue; // out-of-shard: not this receipt's business
+                if (onlyIds != null) continue; // outside --taskIds filter: same treatment
+                throw new BenchException("Missing result for task " + taskIdFor(item)
+                    + " (neither attempted nor unattempted) — internal error");
+            }
+            merged.add(r);
+        }
+        return merged;
+    }
+
+    /**
+     * The {@code --shard=i/n} argument: run only slice {@code i} of
+     * {@code n} (0-based). Returns {@code [i, n]}, or null when absent.
+     */
+    static int[] parseShard(List<String> args) {
+        String flag = args.stream().filter(a -> a.startsWith("--shard=")).findFirst().orElse(null);
+        if (flag == null) return null;
+        String[] parts = flag.substring("--shard=".length()).split("/");
+        if (parts.length != 2) throw new IllegalArgumentException(
+            "Expected --shard=i/n, got: " + flag);
+        int i = Integer.parseInt(parts[0].trim());
+        int n = Integer.parseInt(parts[1].trim());
+        if (n < 1 || i < 0 || i >= n) throw new IllegalArgumentException(
+            "Expected --shard=i/n with 0 <= i < n, got: " + flag);
+        return new int[]{i, n};
+    }
+
+    /**
+     * The {@code --taskIds=a,b,c} argument: run only tasks whose id starts
+     * with one of the given prefixes. Returns null when absent.
+     */
+    static Set<String> parseTaskIds(List<String> args) {
+        String flag = args.stream().filter(a -> a.startsWith("--taskIds=")).findFirst().orElse(null);
+        if (flag == null) return null;
+        Set<String> ids = new LinkedHashSet<>();
+        for (String part : flag.substring("--taskIds=".length()).split(",")) {
+            String p = part.trim();
+            if (!p.isEmpty()) ids.add(p);
+        }
+        if (ids.isEmpty()) throw new IllegalArgumentException(
+            "Expected --taskIds=a,b,c with at least one id prefix, got: " + flag);
+        return ids;
     }
 }
